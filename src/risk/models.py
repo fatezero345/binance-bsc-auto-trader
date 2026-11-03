@@ -84,6 +84,9 @@ class PortfolioState:
     realized_loss_usdt: Decimal             # 累计已实现亏损（正数=亏了）
     open_positions: int
     open_notional_usdt: Decimal = Decimal("0")
+    # 计价币的**可用**余额（现货钱包 free）。没有它，风控会放行一单
+    # 明明买不起的订单 —— 这是 2026-11-03 实测余额 0.00000142 USDT 时发现的缺口。
+    quote_free_usdt: Decimal = Decimal("999999")
 
 
 @dataclass(frozen=True)
@@ -142,6 +145,9 @@ class RiskDecision:
     approved: bool
     violations: tuple[str, ...] = ()
     computed_risk_usdt: Decimal = Decimal("0")
+    # 不阻断、但必须记账的项：所有者显式接受的风险位、以及"能过但值得看一眼"的状态。
+    # 与 violations 分开，是为了不把"已授权的风险"伪装成"通过"，也不让它静默消失。
+    warnings: tuple[str, ...] = ()
 
     def raise_if_rejected(self) -> None:
         if not self.approved:

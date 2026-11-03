@@ -109,6 +109,11 @@ class Policy:
     def binance_perms(self) -> dict:
         return self._get("venue", "binance")
 
+    @property
+    def accepted_risk_flags(self) -> dict:
+        """所有者已署名接受的风险位（flag -> 理由）。放行但记账。"""
+        return self.binance_perms.get("accepted_risk_flags", {}) or {}
+
     # ---- 标的 ----
     @property
     def symbols(self) -> frozenset[str]:
@@ -237,15 +242,25 @@ def assess(
     # ★ 提币权与所有危险开关，一律以 **Key 级**权限位为准。
     #   账户级 canWithdraw 不等于这把 Key 能不能提币（2026-11-03 实测两者不一致）。
     key = permissions.key
+    warnings: list[str] = []
     if key is None:
         v.append("key_permissions_unavailable")
     else:
-        banned_key_flags = set(policy.binance_perms.get("forbidden_key_flags", []))
+        forbidden_flags = set(policy.binance_perms.get("forbidden_key_flags", []))
+        accepted_flags = dict(policy.accepted_risk_flags)
         for flag in key.dangerous():
-            if not banned_key_flags or flag in banned_key_flags:
+            if flag in forbidden_flags:
                 v.append(f"key_flag_dangerous:{flag}")
+            elif flag in accepted_flags:
+                # 放行，但必须留下痕迹：谁签的、为什么
+                warnings.append(f"key_flag_accepted:{flag}")
+            else:
+                # 既没禁、也没人签 —— 不允许静默通过
+                v.append(f"key_flag_unaccounted:{flag}")
         if policy.binance_perms.get("require_ip_restrict", True) and not key.ip_restrict:
             v.append("key_ip_restrict_disabled")
+        elif not key.ip_restrict:
+            warnings.append("key_ip_restrict_disabled_accepted")
         if not key.enable_reading:
             v.append("key_reading_disabled")
         if not key.enable_spot_trading:
@@ -334,7 +349,17 @@ def assess(
     if risk > state.equity_usdt:
         v.append("risk_exceeds_equity")
 
-    return RiskDecision(approved=not v, violations=tuple(v), computed_risk_usdt=risk)
+    # 13) 可用余额：买不起就是买不起。
+    #     2026-11-03 实测账户只有 0.00000142 USDT 时才发现的缺口 ——
+    #     没有这一条，风控会放行一单 5 USDT 的订单，然后在交易所被 -2010 拒掉。
+    if intent.side.value == "buy" and intent.quote_notional_usdt > state.quote_free_usdt:
+        v.append(
+            f"insufficient_free_balance:{intent.quote_notional_usdt}>{state.quote_free_usdt}"
+        )
+
+    return RiskDecision(
+        approved=not v, violations=tuple(v), computed_risk_usdt=risk, warnings=tuple(warnings)
+    )
 
 
 def execution_gate(policy: Policy, environ: dict[str, str] | None = None) -> ExecutionGate:

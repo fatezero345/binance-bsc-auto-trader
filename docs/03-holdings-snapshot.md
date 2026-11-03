@@ -148,3 +148,28 @@ assets returned: 1 | non-zero: 1
 API Key 是在哪个账户下创建的。这一点无法由 API 自身判定。
 
 在余额与 Key 归属对齐之前，交易无从谈起——不是风控不同意，是**账户里没有可交易的余额**。
+---
+
+## 九、ADR-0003 之后的真实判决（2026-11-03 14:0x）
+
+所有者明确接受 `enableFutures` / `enableInternalTransfer` / 无 IP 白名单三项风险（[ADR-0003](adr/0003-accepted-key-risks.md)）。据此把「拒绝」改为「署名接受 + 记账」，然后跑一次完整判决——**只判不下单**：
+
+```
+intent      : BUY 2.72000000 CAKEUSDT @ 1.84300000 = 5.0130 USDT
+free USDT   : 0.00000142
+approved    : False
+violations  : ['risk_exceeds_equity', 'insufficient_free_balance:5.0130>0.00000142']
+warnings    : ['key_flag_accepted:enable_internal_transfer',
+               'key_flag_accepted:enable_futures',
+               'key_ip_restrict_disabled_accepted']
+gate        : CLOSED ['policy.execution.enabled=false', 'policy.execution.dry_run=true',
+                      'env TRADER_LIVE_ORDERS not set']
+```
+
+三件事同时成立了：
+
+1. **权限不再是障碍** —— 三项都变成 `warnings`，不再进 `violations`；
+2. **真正的障碍是余额** —— `insufficient_free_balance:5.0130 > 0.00000142`。这一条是 2026-11-03 才补上的检查（原本风控会放行一单买不起的订单，然后在交易所被 `-2010` 拒掉）；
+3. **执行仍关闭** —— 三道开关全关，与余额无关。
+
+顺带补的 `risk_exceeds_equity`：`equity_usdt` 现在取实际可用余额（0.00000142），不是配置里的 29.30。**配置里的本金与账户里的钱已经脱钩，这是事实，不是笔误。**

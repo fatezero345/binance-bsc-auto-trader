@@ -206,22 +206,52 @@ class TestRiskGate(unittest.TestCase):
         d = assess(intent(), state(), perms, self.p)
         self.assertTrue(d.approved, d.violations)
 
-    def test_r14_futures_and_transfer_flags_are_rejected(self):
-        for flag in ("enable_futures", "enable_internal_transfer", "enable_margin",
-                     "permits_universal_transfer", "enable_portfolio_margin",
-                     "enable_vanilla_options"):
+    def _key(self, **over) -> KeyFlags:
+        kw = dict(
+            enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
+            enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+            enable_vanilla_options=False, permits_universal_transfer=False,
+            enable_portfolio_margin=False, ip_restrict=True,
+        )
+        kw.update(over)
+        return KeyFlags(**kw)
+
+    def test_hard_red_line_flags_are_rejected(self):
+        """红线只有两条：能把钱搬出平台的（提币 / 万能划转）。"""
+        for flag in ("enable_withdrawals", "permits_universal_transfer"):
             with self.subTest(flag=flag):
-                kw = dict(
-                    enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
-                    enable_internal_transfer=False, enable_futures=False, enable_margin=False,
-                    enable_vanilla_options=False, permits_universal_transfer=False,
-                    enable_portfolio_margin=False, ip_restrict=True,
-                )
-                kw[flag] = True
-                perms = AccountPermissions(True, False, False, ("SPOT",), KeyFlags(**kw))
+                perms = AccountPermissions(True, False, False, ("SPOT",), self._key(**{flag: True}))
                 d = assess(intent(), state(), perms, self.p)
                 self.assertFalse(d.approved)
                 self.assertIn(f"key_flag_dangerous:{flag}", d.violations)
+
+    def test_owner_accepted_flags_pass_but_are_recorded(self):
+        """ADR-0003：所有者署名接受的权限位放行，但必须留下 warnings 痕迹。
+
+        这两个断言合起来才是完整的：既不能因为"接受了"就静默通过，
+        也不能因为"危险"就把已经签过的决定反复推翻。
+        """
+        for flag in ("enable_futures", "enable_internal_transfer", "enable_margin",
+                     "enable_portfolio_margin", "enable_vanilla_options"):
+            with self.subTest(flag=flag):
+                perms = AccountPermissions(True, False, False, ("SPOT",), self._key(**{flag: True}))
+                d = assess(intent(), state(), perms, self.p)
+                self.assertTrue(d.approved, d.violations)
+                self.assertIn(f"key_flag_accepted:{flag}", d.warnings)
+
+    def test_unaccounted_flag_is_rejected(self):
+        """既不在红线上、也没有署名接受记录的风险位 —— 不允许静默通过。"""
+        # 用一个不在任何一张表里的危险位（KeyFlags.dangerous() 里没有的不会被扫到，
+        # 所以这里用配置层面能构造的方式验证：把 accepted 表清空后 futures 应被拒）
+        from src.risk import Policy as _P
+
+        raw = load_policy().raw
+        raw["venue"]["binance"]["accepted_risk_flags"] = {}
+        p2 = _P(raw)
+        perms = AccountPermissions(True, False, False, ("SPOT",), self._key(enable_futures=True))
+        d = assess(intent(), state(), perms, p2)
+        self.assertFalse(d.approved)
+        self.assertIn("key_flag_unaccounted:enable_futures", d.violations)
 
     def test_missing_key_flags_fail_closed(self):
         perms = AccountPermissions(True, False, False, ("SPOT",), None)
@@ -229,17 +259,22 @@ class TestRiskGate(unittest.TestCase):
         self.assertFalse(d.approved)
         self.assertIn("key_permissions_unavailable", d.violations)
 
-    def test_ip_restrict_disabled_is_rejected(self):
-        no_ip = KeyFlags(
-            enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
-            enable_internal_transfer=False, enable_futures=False, enable_margin=False,
-            enable_vanilla_options=False, permits_universal_transfer=False,
-            enable_portfolio_margin=False, ip_restrict=False,
-        )
-        perms = AccountPermissions(True, False, False, ("SPOT",), no_ip)
+    def test_ip_restrict_disabled_is_a_warning_not_a_block(self):
+        """ADR-0003：实验账户接受无 IP 白名单 —— 放行但记账。"""
+        perms = AccountPermissions(True, False, False, ("SPOT",), self._key(ip_restrict=False))
         d = assess(intent(), state(), perms, self.p)
+        self.assertTrue(d.approved, d.violations)
+        self.assertIn("key_ip_restrict_disabled_accepted", d.warnings)
+
+    def test_insufficient_free_balance_is_rejected(self):
+        """2026-11-03 实测账户只有 0.00000142 USDT 时补上的缺口。"""
+        broke = PortfolioState(
+            equity_usdt=D("29.30"), realized_loss_usdt=D("0"), open_positions=0,
+            quote_free_usdt=D("0.00000142"),
+        )
+        d = assess(intent(), broke, GOOD_PERMS, self.p)
         self.assertFalse(d.approved)
-        self.assertIn("key_ip_restrict_disabled", d.violations)
+        self.assertTrue(any(v.startswith("insufficient_free_balance") for v in d.violations))
 
     def test_account_cannot_trade_is_rejected(self):
         perms = AccountPermissions(False, False, False, ("SPOT",), SAFE_KEY)

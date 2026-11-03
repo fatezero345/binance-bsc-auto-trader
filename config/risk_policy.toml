@@ -30,17 +30,8 @@ require_can_trade = true
 # ★ 必须按 **Key 级** 权限位判定，不能用账户级 canWithdraw。
 #   2026-11-03 实测：账户 canWithdraw=True，而 Key 的 enableWithdrawals=False
 #   —— 读错字段会误报"提币权开着"。
-require_ip_restrict = true             # 必须开 IP 白名单
-# 任何一项为 true 即拒绝下单。这份清单是"越界"的定义。
-forbidden_key_flags = [
-  "enable_withdrawals",          # 提币
-  "enable_internal_transfer",    # 内部划转（能在自己的钱包/子账户之间搬钱）
-  "enable_futures",              # 合约
-  "enable_margin",               # 杠杆
-  "enable_vanilla_options",      # 期权
-  "permits_universal_transfer",  # 万能划转
-  "enable_portfolio_margin",     # 组合保证金
-]
+require_ip_restrict = false            # ADR-0003：实验账户接受无 IP 白名单
+
 # 允许的权限标记（正则）：SPOT，或 Binance 区域性实体使用的交易组标记 TRD_GRP_<digits>。
 # 2026-11-03 实测：本账户返回 ["TRD_GRP_236"]，说明"只认 SPOT 子集"是过严的错判 ——
 # 真实账户会被自己的策略误杀。改为「允许清单 + 禁止词」双段判定。
@@ -48,6 +39,13 @@ allow_permission_patterns = ["^SPOT$", "^TRD_GRP_[0-9]+$"]
 # 出现任一标记即拒绝（这些才是真正越界的权限）
 forbidden_permission_markers = ["MARGIN", "LEVERAGED", "FUTURES", "OPTIONS", "CONVERT", "EARN"]
 require_ip_whitelist = true            # 由人工在交易所侧确认，脚本只做记录
+
+# 出现即**拒绝下单**的硬红线。只在"钱能被搬出平台"的方向上保留。
+forbidden_key_flags = [
+  "enable_withdrawals",          # 提币 —— 唯一保留的红线
+  "permits_universal_transfer",  # 万能划转（可跨账户搬钱）
+]
+
 # 明确禁止的交易模式（不是"没实现"，是"参数里没有这条路"）
 forbidden_modes = [
   "margin",
@@ -61,6 +59,16 @@ forbidden_modes = [
   "earn",
   "loan",
 ]
+
+# 所有者已明确接受的风险位：记录，但不拒绝（见 docs/adr/0003-*.md）。
+# 规则：任何危险位必须落在 forbidden_key_flags 或本表之一 ——
+# 要么拒绝，要么有署名的接受记录；不允许"既不禁、也没人签"。
+[venue.binance.accepted_risk_flags]
+enable_futures           = "ADR-0003 / 2026-11-03 所有者明确接受；本仓库无任何合约代码路径"
+enable_internal_transfer = "ADR-0003 / 同上；只在自己的钱包间搬钱，搬不出平台"
+enable_margin            = "ADR-0003 / 同上；本仓库无任何杠杆代码路径"
+enable_vanilla_options   = "ADR-0003 / 同上；本仓库无任何期权代码路径"
+enable_portfolio_margin  = "ADR-0003 / 同上"
 
 [order_limits]
 # 单笔目标金额。2026-11-03 由所有者从 10.00 下调为 5.00。

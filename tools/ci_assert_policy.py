@@ -59,15 +59,21 @@ def main() -> int:
     if "gmgn_bsc" not in policy.archived_venues:
         failures.append("venue.archived no longer lists gmgn_bsc -- ADR-0002 regression")
 
-    # --- CEX 模型的安全前提 ---
+    # --- CEX 模型的安全前提（ADR-0003：红线 + 署名接受表，二选一，不允许两头空）---
     perms = policy.binance_perms
     flags = set(perms.get("forbidden_key_flags", []))
+    accepted = set(perms.get("accepted_risk_flags", {}))
     if "enable_withdrawals" not in flags:
-        failures.append("forbidden_key_flags must still contain enable_withdrawals")
-    if "enable_futures" not in flags:
-        failures.append("forbidden_key_flags must still contain enable_futures")
-    if not perms.get("require_ip_restrict", False):
-        failures.append("require_ip_restrict must stay true")
+        failures.append("forbidden_key_flags must still contain enable_withdrawals (red line)")
+    if "permits_universal_transfer" not in flags:
+        failures.append("forbidden_key_flags must still contain permits_universal_transfer")
+    for flag in ("enable_futures", "enable_internal_transfer", "enable_margin",
+                 "enable_vanilla_options", "enable_portfolio_margin"):
+        if flag not in flags and flag not in accepted:
+            failures.append(f"{flag} is neither forbidden nor in accepted_risk_flags")
+    overlap = flags & accepted
+    if overlap:
+        failures.append(f"flags both forbidden and accepted: {sorted(overlap)}")
 
     # --- 可行窗口：交易所下限 < 本项目硬上限（严格小于，否则窗口为空）---
     if policy.min_notional >= policy.notional_ceiling:
