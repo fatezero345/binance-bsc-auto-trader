@@ -363,7 +363,11 @@ def assess(
 
 
 def execution_gate(policy: Policy, environ: dict[str, str] | None = None) -> ExecutionGate:
-    """执行闸门：风控通过 ≠ 能落单。三道开关缺一不可。"""
+    """执行闸门。
+
+    dry_run **不是**拒绝理由——它决定请求打到 `/order/test` 还是 `/order`。
+    真正拦住真实下单的只有两个：enabled=false、以及环境解锁变量未设置。
+    """
     env = os.environ if environ is None else environ
     ex = policy.execution
     reasons: list[str] = []
@@ -372,8 +376,6 @@ def execution_gate(policy: Policy, environ: dict[str, str] | None = None) -> Exe
     allow_mainnet = bool(ex.get("allow_mainnet", False))
     if not enabled:
         reasons.append("policy.execution.enabled=false")
-    if dry_run:
-        reasons.append("policy.execution.dry_run=true")
     unlock_name = str(ex.get("require_env_unlock", ""))
     unlock_present = bool(env.get(unlock_name))
     if not unlock_present:

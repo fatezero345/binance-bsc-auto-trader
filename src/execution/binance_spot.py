@@ -29,6 +29,9 @@ USER_AGENT = "binance-bsc-auto-trader/p0"
 # 唯一允许提交的路径。
 # 提币与划转在这里不是"被注释掉了"，而是**根本不存在对应的函数与常量**。
 ORDER_PATH = "/api/v3/order"
+# 交易所的订单测试端点：校验签名、参数、过滤器，**不进入撮合**。
+# dry_run 用这条路径，而不是"什么都不发"——否则 dry_run 永远证明不了接线是通的。
+TEST_ORDER_PATH = "/api/v3/order/test"
 
 
 class ExecutionRefused(RuntimeError):
@@ -62,21 +65,37 @@ def build_order_params(
     gate: ExecutionGate,
     permissions: AccountPermissions,
     decision: RiskDecision | None = None,
+    *,
+    for_preflight: bool = False,
 ) -> OrderPlan:
-    """纯函数：算出"如果真要下，会发什么"，并给出所有拦住它的理由。"""
-    reasons: list[str] = list(gate.reasons)
+    """纯函数：算出"如果真要下，会发什么"，并给出所有拦住它的理由。
+
+    ``for_preflight=True`` 时不要求"真实下单解锁"环境变量 —— 因为预检走的是
+    /order/test，不撮合、不动钱。真实下单（submit_order）仍然强制要求它。
+    """
+    reasons: list[str] = [
+        r for r in gate.reasons
+        if not (for_preflight and r.startswith("env "))
+    ]
 
     if decision is not None and not decision.approved:
         reasons.extend(decision.violations)
 
-    # Key 级权限：危险开关必须全关。第二道同样的检查（assess 里是第一道）。
+    # Key 级权限：红线拒绝、署名接受放行、没登账的拒绝。
+    # 这一段必须与 src/risk/policy.py::assess() 保持同一套语义，
+    # 否则会出现"风控放行、执行拦下"的自相矛盾（2026-11-03 实际踩到）。
     key = permissions.key
     if key is None:
         reasons.append("key_permissions_unavailable")
     else:
+        forbidden_flags = set(policy.binance_perms.get("forbidden_key_flags", []))
+        accepted_flags = dict(policy.accepted_risk_flags)
         for flag in key.dangerous():
-            reasons.append(f"key_flag_dangerous:{flag}")
-        if not key.ip_restrict:
+            if flag in forbidden_flags:
+                reasons.append(f"key_flag_dangerous:{flag}")
+            elif flag not in accepted_flags:
+                reasons.append(f"key_flag_unaccounted:{flag}")
+        if not key.ip_restrict and policy.binance_perms.get("require_ip_restrict", True):
             reasons.append("key_ip_restrict_disabled")
 
     side = "BUY" if intent.side is Side.BUY else "SELL"
@@ -104,13 +123,71 @@ def build_order_params(
         "newOrderRespType": "FULL",
     }
 
+    # dry_run 不是"不发"，而是"发到 /order/test"。这样每一次 dry_run 都在
+    # 真实校验签名、时钟、参数与过滤器 —— 而不是在本地自我安慰。
+    path = TEST_ORDER_PATH if gate.dry_run else ORDER_PATH
     would_submit = bool(base_url) and not reasons
     return OrderPlan(
         base_url=base_url or "",
-        path=ORDER_PATH,
+        path=path,
         params=params,
         would_submit=would_submit,
         reasons=tuple(reasons),
+    )
+
+
+def _signed_post(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
+                 base_url: str, recv_window: int, timeout: int) -> dict:
+    q = dict(params)
+    q["timestamp"] = int(time.time() * 1000)
+    q["recvWindow"] = recv_window
+    query = urllib.parse.urlencode(q)
+    signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
+    url = f"{base_url.rstrip('/')}{path}?{query}&signature={signature}"
+
+    req = urllib.request.Request(
+        url,
+        data=b"",
+        headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body) if body.strip() else {"ok": True}
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", "replace")[:400]
+        raise ExecutionRefused(f"{path} rejected HTTP {exc.code}: {body}") from exc
+
+
+def preflight_order(
+    intent: OrderIntent,
+    gate: ExecutionGate,
+    policy: Policy,
+    permissions: AccountPermissions,
+    api_key: str,
+    api_secret: str,
+    *,
+    timeout: int = 15,
+) -> dict:
+    """打交易所的 /order/test：不撮合、不动钱，但会真校验签名与过滤器。
+
+    刻意**不要求** RiskDecision：这条路径不产生成交，它的用途是验证接线。
+    真正的下单仍然必须过 assess()。
+    """
+    plan = build_order_params(intent, policy, gate, permissions, None, for_preflight=True)
+    if not plan.would_submit:
+        raise ExecutionRefused("; ".join(plan.reasons) or "gate closed")
+    if plan.path != TEST_ORDER_PATH:
+        raise ExecutionRefused("preflight refused: dry_run is off, this would place a real order")
+    return _signed_post(
+        plan.path,
+        plan.params,
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=plan.base_url,
+        recv_window=int(policy.raw["venue"]["recv_window_ms"]),
+        timeout=timeout,
     )
 
 
@@ -125,7 +202,7 @@ def submit_order(
     *,
     timeout: int = 15,
 ) -> dict:
-    """唯一含网络写入的函数。四道门不全开时抛 ExecutionRefused，不触网。"""
+    """真正下单。四道门不全开时抛 ExecutionRefused，不触网。"""
     if not decision.approved:
         raise ExecutionRefused("risk not approved: " + "; ".join(decision.violations))
 
@@ -133,25 +210,15 @@ def submit_order(
     if not plan.would_submit:
         raise ExecutionRefused("; ".join(plan.reasons) or "gate closed")
 
-    q = dict(plan.params)
-    q["timestamp"] = int(time.time() * 1000)
-    q["recvWindow"] = int(policy.raw["venue"]["recv_window_ms"])
-    query = urllib.parse.urlencode(q)
-    signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
-    url = f"{plan.base_url}{plan.path}?{query}&signature={signature}"
-
-    req = urllib.request.Request(
-        url,
-        data=b"",
-        headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT},
-        method="POST",
+    return _signed_post(
+        plan.path,
+        plan.params,
+        api_key=api_key,
+        api_secret=api_secret,
+        base_url=plan.base_url,
+        recv_window=int(policy.raw["venue"]["recv_window_ms"]),
+        timeout=timeout,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:400]
-        raise ExecutionRefused(f"order rejected HTTP {exc.code}: {body}") from exc
 
 
 def describe(intent: OrderIntent, plan: OrderPlan) -> str:

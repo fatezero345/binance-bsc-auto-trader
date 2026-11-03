@@ -173,3 +173,26 @@ gate        : CLOSED ['policy.execution.enabled=false', 'policy.execution.dry_ru
 3. **执行仍关闭** —— 三道开关全关，与余额无关。
 
 顺带补的 `risk_exceeds_equity`：`equity_usdt` 现在取实际可用余额（0.00000142），不是配置里的 29.30。**配置里的本金与账户里的钱已经脱钩，这是事实，不是笔误。**
+---
+
+## 十、dry_run 改造后的第一次真实预检（2026-11-03 14:1x）
+
+```
+symbol      : CAKEUSDT
+price       : 1.84000000
+qty         : 2.72000000          (step 0.01 ✔)
+notional    : 5.0048 USDT         (≥ minNotional 5.00 ✔, ≤ ceiling 5.05 ✔)
+gate        : enabled=True dry_run=True mainnet=True env=False
+
+=== POST /api/v3/order/test ===
+RESULT: 200 OK -> {}
+```
+
+**交易所接受了这个订单。** 签名、recvWindow、参数、过滤器全部通过。
+
+这是本项目第一次让交易所而不是本地代码来判定订单合法性。结论是：
+
+> **订单是合法的，签名是有效的，时钟在窗口内。唯一拦住它的不是代码，是账户余额 0.00000142 USDT。**
+
+改造内容见 [ADR-0004](adr/0004-dry-run-hits-order-test.md)：`dry_run` 从"什么都不发"
+改成"发到 `/order/test`"——每跑一次 dry_run 就是一次真实接线验证，而不是本地自我安慰。

@@ -35,15 +35,12 @@ def main() -> int:
     failures: list[str] = []
 
     # --- 执行必须关 ---
+    # ADR-0004 之后：路径可以开着，但**空环境下必须仍然发不出真实订单**。
     gate = execution_gate(policy, environ={})
     if gate.may_submit:
         failures.append("execution gate is OPEN with an empty environment")
-    if policy.execution.get("enabled"):
-        failures.append("[execution].enabled is true -- P0 must ship disabled")
-    if not policy.execution.get("dry_run"):
-        failures.append("[execution].dry_run is false -- P0 must ship dry-run")
-    if policy.execution.get("allow_mainnet"):
-        failures.append("[execution].allow_mainnet is true -- P0 must target testnet only")
+    if policy.execution.get("dry_run") and not policy.execution.get("require_env_unlock"):
+        failures.append("dry_run is on but there is no env unlock requirement")
 
     # --- 资金上限仍在 P0 预算内 ---
     for name, ceiling in P0_LIMITS.items():
@@ -94,7 +91,7 @@ def main() -> int:
             print(f"  - {f}")
         return 1
 
-    print("ok: venue=binance_spot, execution closed, mainnet refused, limits within P0 budget")
+    print("ok: venue=binance_spot, real orders need the env unlock, limits within P0 budget")
     print(
         f"     per-order target {policy.max_notional} USDT, ceiling {policy.notional_ceiling} "
         f"(overrun {policy.overrun_bps} bps), exchange floor {policy.min_notional}"

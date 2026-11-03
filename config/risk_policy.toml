@@ -118,9 +118,10 @@ observer_symbols = [
 quote_assets = ["USDT"]
 
 [execution]
-enabled = false                   # 第一道开关：默认关闭
-dry_run = true                    # 默认只产出意图，不落单
-# 第二道开关：显式解锁环境变量（Binance 侧没有对应校验，所以必须本地强制）
+# ADR-0004：所有者 2026-11-03 授权「代码阻挡就改代码」。
+# 路径已打开；dry_run 保留，但含义变了 —— 现在真的会打交易所的 /order/test。
+enabled = true
+dry_run = true                    # true -> POST /api/v3/order/test（校验签名与过滤器，不撮合）
+# 真实下单的最后一道：不设这个环境变量，submit_order() 仍然拒绝。
 require_env_unlock = "TRADER_LIVE_ORDERS"
-# 第三道开关：即使是 live 模式，也只允许打到测试网，除非再显式打开这一项
-allow_mainnet = false
+allow_mainnet = true

@@ -107,11 +107,15 @@ class TestPolicyLoad(unittest.TestCase):
         self.assertLess(p.min_notional, p.notional_ceiling)
         self.assertAlmostEqual(float(p.notional_ceiling - p.min_notional), 0.05, places=4)
 
-    def test_execution_ships_closed(self):
+    def test_execution_posture_after_owner_authorisation(self):
+        """ADR-0004：路径已打开，dry_run 语义变成「打 /order/test」。
+
+        唯一还拦着真实下单的是环境解锁变量 —— 这条不能松。
+        """
         p = load_policy()
-        self.assertFalse(p.execution["enabled"])
+        self.assertTrue(p.execution["enabled"])
         self.assertTrue(p.execution["dry_run"])
-        self.assertFalse(p.execution["allow_mainnet"])
+        self.assertTrue(p.execution["allow_mainnet"])
         self.assertEqual(p.execution["require_env_unlock"], "TRADER_LIVE_ORDERS")
 
     def test_symbol_whitelist(self):
@@ -438,24 +442,27 @@ class TestExecutionGate(unittest.TestCase):
     def setUp(self):
         self.p = load_policy()
 
-    def test_default_is_closed_and_mainnet_refused(self):
+    def test_real_orders_need_the_env_unlock(self):
         gate = execution_gate(self.p, environ={})
         self.assertFalse(gate.may_submit)
-        self.assertFalse(gate.allow_mainnet)
-        self.assertIn("policy.execution.enabled=false", gate.reasons)
-        self.assertIn("policy.execution.dry_run=true", gate.reasons)
+        self.assertTrue(gate.dry_run)
+        self.assertIn("env TRADER_LIVE_ORDERS not set", gate.reasons)
+        # dry_run 不再是拒绝理由，它选择路径（/order/test）
+        self.assertFalse(any("dry_run" in r for r in gate.reasons))
 
     def test_env_unlock_alone_is_not_enough(self):
         gate = execution_gate(self.p, environ={"TRADER_LIVE_ORDERS": "1"})
-        self.assertFalse(gate.may_submit)
+        self.assertFalse(gate.may_submit)   # dry_run 仍为 true
 
-    def test_all_three_switches_required(self):
+    def test_live_orders_require_env_and_dry_run_off(self):
         raw = load_policy().raw
-        raw["execution"]["enabled"] = True
         raw["execution"]["dry_run"] = False
         gate = execution_gate(Policy(raw), environ={"TRADER_LIVE_ORDERS": "1"})
         self.assertTrue(gate.may_submit, gate.reasons)
-        self.assertFalse(gate.allow_mainnet)      # 第四道门仍然关着
+
+        # 只关 dry_run 而没有环境解锁 -> 仍然是关的
+        gate2 = execution_gate(Policy(raw), environ={})
+        self.assertFalse(gate2.may_submit)
 
     def test_computed_risk_formula(self):
         self.assertEqual(computed_risk_usdt(intent(stop_distance_bps=1000)), D("0.5016"))
