@@ -152,6 +152,28 @@ def permissions_from_account(account: dict) -> AccountPermissions:
     )
 
 
+def query_order(api_key: str, api_secret: str, *, symbol: str,
+                client_order_id: str | None = None, order_id: int | None = None,
+                base: str = DEFAULT_BASE) -> dict:
+    """GET /api/v3/order —— **只读**确认某笔订单的真实状态。
+
+    存在的理由：下单请求如果没拿到响应（TLS 断/超时），本地不知道成交没有。
+    这时唯一可靠的答案是回查交易所。**不能用余额去猜。**
+
+    刻意不走 READ_ONLY_PATHS：那张表语义是"账户与余额查询"，
+    而这条是"按 id 查订单"，用途不同，单独一个函数更容易审计。
+    它只有 GET —— 下单必须走 src/execution，不能从这里溜进去。
+    """
+    if not client_order_id and order_id is None:
+        raise WalletError("query_order needs client_order_id or order_id")
+    params: dict[str, Any] = {"symbol": symbol}
+    if client_order_id:
+        params["origClientOrderId"] = client_order_id
+    else:
+        params["orderId"] = order_id
+    return _signed("GET", "/api/v3/order", params, api_key=api_key, api_secret=api_secret,
+                   base=base, recv_window=5000, timeout=15)
+
 def balances(account: dict, assets: tuple[str, ...] = ("USDT", "BNB")) -> dict[str, str]:
     """只返回关心的资产，避免把整个账户余额表写进日志。"""
     out: dict[str, str] = {}

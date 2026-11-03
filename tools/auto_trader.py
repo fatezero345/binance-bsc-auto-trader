@@ -31,7 +31,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from src.execution.binance_spot import ExecutionRefused, submit_order  # noqa: E402
+from src.execution.binance_spot import (  # noqa: E402
+    ExecutionRefused,
+    OrderStateUnknown,
+    submit_order,
+)
 from src.market import binance_public as bp  # noqa: E402
 from src.risk import (  # noqa: E402
     Instrument,
@@ -60,6 +64,8 @@ STOP_BPS = 500               # -5%
 TP_BPS = 600                 # +6%（覆盖来回 0.2% 手续费后仍有余量）
 MAX_HOLD_S = 4 * 3600        # 4 小时未触发则市价退出
 COOLDOWN_S = 900             # 平仓后 15 分钟内不重新开仓
+LOCK = ROOT / "runs" / "tick.lock"
+LOCK_STALE_S = 240           # 超过 4 分钟视为僵尸锁（正常 tick 只有几秒）
 
 
 def log(kind: str, **kw) -> None:
@@ -95,6 +101,59 @@ def load_creds() -> tuple[str, str, bool]:
 
 def price_of(symbol: str) -> float:
     return float(bp.last_price(symbol))
+
+
+def acquire_lock() -> bool:
+    """单实例锁。
+
+    2026-11-03 实测：计划任务每 5 分钟 + 手动运行会重叠，
+    111 个事件里有 30 次间隔 < 60s（最短 8s）。两个 tick 同时看到"无持仓"
+    就会各买一笔 —— 直接突破 max_open_positions = 1。
+    """
+    LOCK.parent.mkdir(parents=True, exist_ok=True)
+    if LOCK.exists():
+        try:
+            age = time.time() - LOCK.stat().st_mtime
+        except FileNotFoundError:
+            age = LOCK_STALE_S + 1
+        if age < LOCK_STALE_S:
+            return False
+        LOCK.unlink(missing_ok=True)
+    LOCK.write_text(f"{os.getpid()} {time.time()}", encoding="utf-8")
+    return True
+
+
+def release_lock() -> None:
+    LOCK.unlink(missing_ok=True)
+
+
+def _position_from(res: dict, fallback_qty: str, fallback_price: float) -> Position:
+    filled = float(res.get("executedQty") or fallback_qty)
+    fills = res.get("fills") or []
+    entry = float(fills[0].get("price", fallback_price)) if fills else float(fallback_price)
+    return Position(symbol=SYMBOL, qty=str(filled), entry_price=entry,
+                    stop_price=entry * (1 - STOP_BPS / 10_000),
+                    tp_price=entry * (1 + TP_BPS / 10_000),
+                    opened_ts=int(time.time()))
+
+
+def _confirm(key: str, secret: str, exc, side: str) -> dict | None:
+    """按 clientOrderId 回查交易所，确认那笔状态未知的订单到底成没成。
+
+    返回已成交的订单 dict；返回 None 表示"没成交"或"查不到"，调用方不得建仓/清仓。
+    """
+    try:
+        o = wa.query_order(key, secret, symbol=exc.symbol or SYMBOL,
+                           client_order_id=exc.client_order_id)
+    except Exception as e:                                   # noqa: BLE001
+        log("order_confirm_failed", side=side, cid=exc.client_order_id, error=str(e)[:200])
+        return None
+    status = o.get("status")
+    log("order_confirmed", side=side, cid=exc.client_order_id, status=status,
+        executed=o.get("executedQty"))
+    if status in ("FILLED", "PARTIALLY_FILLED"):
+        return o
+    return None
 
 
 def do_buy(policy: Policy, key: str, secret: str, live: bool) -> None:
@@ -143,18 +202,19 @@ def do_buy(policy: Policy, key: str, secret: str, live: bool) -> None:
         return
     try:
         res = submit_order(intent, d, gate, live_policy, perms, key, secret)
+    except OrderStateUnknown as exc:
+        # 请求发出后没拿到响应 —— 立刻回查，绝不重试
+        log("order_state_unknown", side="BUY", cid=exc.client_order_id, error=str(exc)[:200])
+        res = _confirm(key, secret, exc, "BUY")
+        if not res:
+            return
     except ExecutionRefused as exc:
         log("order_failed", side="BUY", error=str(exc)[:400])
         return
 
-    filled = float(res.get("executedQty") or qty)
-    entry = float(res.get("fills", [{}])[0].get("price", snap.price)) if res.get("fills") else float(snap.price)
-    pos = Position(symbol=SYMBOL, qty=str(filled), entry_price=entry,
-                   stop_price=entry * (1 - STOP_BPS / 10_000),
-                   tp_price=entry * (1 + TP_BPS / 10_000),
-                   opened_ts=int(time.time()))
+    pos = _position_from(res, str(qty), snap.price)
     save_state({"position": pos.as_dict(), "closed_ts": 0})
-    log("bought", symbol=SYMBOL, qty=str(filled), entry=entry,
+    log("bought", symbol=SYMBOL, qty=pos.qty, entry=pos.entry_price,
         stop=round(pos.stop_price, 6), tp=round(pos.tp_price, 6), response=res)
 
 
@@ -203,6 +263,11 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, pos: Position, wh
         return
     try:
         res = submit_order(intent, d, gate, live_policy, perms, key, secret)
+    except OrderStateUnknown as exc:
+        log("order_state_unknown", side="SELL", cid=exc.client_order_id, error=str(exc)[:200])
+        res = _confirm(key, secret, exc, "SELL")
+        if not res:
+            return
     except ExecutionRefused as exc:
         log("order_failed", side="SELL", error=str(exc)[:400], qty=str(qty))
         return
@@ -247,6 +312,16 @@ def reconcile(key: str, secret: str, st: dict) -> dict:
 
 
 def tick() -> int:
+    if not acquire_lock():
+        log("locked", note="another tick is running; skipping this one")
+        return 0
+    try:
+        return _tick_locked()
+    finally:
+        release_lock()
+
+
+def _tick_locked() -> int:
     key, secret, live = load_creds()
     policy = load_policy()
     st = reconcile(key, secret, load_state())

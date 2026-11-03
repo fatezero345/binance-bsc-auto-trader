@@ -14,6 +14,7 @@ import hashlib
 import hmac
 import json
 import time
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,7 +36,21 @@ TEST_ORDER_PATH = "/api/v3/order/test"
 
 
 class ExecutionRefused(RuntimeError):
-    """闸门未开。这不是错误路径，是 P0 的正常行为。"""
+    """闸门未开，或交易所明确拒绝。**已知结论**：订单没有成交。"""
+
+
+class OrderStateUnknown(ExecutionRefused):
+    """请求发出后没拿到响应（TLS 断、超时、连接重置）。
+
+    这是最危险的失败模式：**订单可能已经成交，也可能没有。**
+    调用方绝不能把它当成"失败"直接重试 —— 那可能变成两笔。
+    必须用 client_order_id 去 GET /api/v3/order 确认。
+    """
+
+    def __init__(self, message: str, client_order_id: str, symbol: str):
+        super().__init__(message)
+        self.client_order_id = client_order_id
+        self.symbol = symbol
 
 
 @dataclass(frozen=True)
@@ -213,9 +228,12 @@ def submit_order(
     if not plan.would_submit:
         raise ExecutionRefused("; ".join(plan.reasons) or "gate closed")
 
+    params = dict(plan.params)
+    # 确定性 clientOrderId：状态未知时靠它去 GET /api/v3/order 确认，不靠猜余额。
+    params["newClientOrderId"] = f"bt{int(time.time() * 1000)}{os.urandom(3).hex()}"[:36]
     return _signed_post(
-        plan.path,
-        plan.params,
+        params=params,
+        path=plan.path,
         api_key=api_key,
         api_secret=api_secret,
         base_url=plan.base_url,
