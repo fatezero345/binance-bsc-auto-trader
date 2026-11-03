@@ -149,16 +149,49 @@ class TestQuantization(unittest.TestCase):
         self.assertEqual(floored, D("2.71"))
         self.assertLess(floored * PRICE["CAKEUSDT"], FILTERS["CAKEUSDT"].min_notional)
 
-    def test_plan_buy_steps_up_past_min_notional(self):
+    def test_plan_uses_the_budget_not_just_min_notional(self):
+        """预算充足时按**预算向下取整**，而不是停在交易所最小合法量上。
+
+        2026-11-03 实盘发现：旧实现从 minNotional 向上取整，上限 8.00 却每单
+        只用 5.5，资金投不出去。新实现 10 / 1.844 = 5.42 CAKE = 9.996 USDT。
+        """
         qty, err = plan_buy_quantity(PRICE["CAKEUSDT"], D("10"), D("5"), D("0.01"), D("0.01"))
+        self.assertIsNone(err, qty)
+        self.assertEqual(qty, D("5.42"))
+        self.assertLessEqual(qty * PRICE["CAKEUSDT"], D("10"))
+        self.assertGreaterEqual(qty * PRICE["CAKEUSDT"], D("5"))
+
+    def test_plan_falls_back_to_min_notional_when_budget_is_tight(self):
+        """预算贴住交易所下限时，向下取整会跌破 minNotional，必须回退到最小合法量。
+
+        CAKE @1.844、minNotional 5、step 0.01：
+          budget 5.02 -> 向下 2.71 = 4.997 < 5 -> 回退 2.72 = 5.01568 <= 5.02  OK
+          budget 5.00 -> 回退 2.72 = 5.01568 > 5.00            -> 无解（R14 的算术来源）
+        """
+        qty, err = plan_buy_quantity(PRICE["CAKEUSDT"], D("5.02"), D("5"), D("0.01"), D("0.01"))
         self.assertIsNone(err, qty)
         self.assertEqual(qty, D("2.72"))
         self.assertGreaterEqual(qty * PRICE["CAKEUSDT"], D("5"))
+        self.assertLessEqual(qty * PRICE["CAKEUSDT"], D("5.02"))
+
+        # 预算正好等于下限时是真的无解：必须拒绝，而不是硬下一笔超预算的单
+        qty2, err2 = plan_buy_quantity(PRICE["CAKEUSDT"], D("5.00"), D("5"), D("0.01"), D("0.01"))
+        self.assertIsNone(qty2)
+        self.assertIn("quantized_above_budget", err2)
+
+    def test_plan_uses_budget_when_window_is_wide(self):
+        """窗口宽裕（8.00 上限）时直接吃满预算：7.9992 / 1.844 = 4.3379 -> 4.33。"""
+        qty, err = plan_buy_quantity(PRICE["CAKEUSDT"], D("7.9992"), D("5"), D("0.01"), D("0.01"))
+        self.assertIsNone(err, qty)
+        self.assertEqual(qty, D("4.33"))
+        self.assertLessEqual(qty * PRICE["CAKEUSDT"], D("7.9992"))
 
     def test_plan_buy_btc(self):
+        # 10 USDT / 76842.01 = 0.0001301 -> 向下 0.00013 = 9.9895 USDT
         qty, err = plan_buy_quantity(PRICE["BTCUSDT"], D("10"), D("5"), D("0.00001"), D("0.00001"))
         self.assertIsNone(err)
-        self.assertEqual(qty, D("0.00007"))
+        self.assertEqual(qty, D("0.00013"))
+        self.assertLessEqual(qty * PRICE["BTCUSDT"], D("10"))
 
     def test_plan_buy_rejects_when_step_overshoots_budget(self):
         qty, err = plan_buy_quantity(PRICE["BTCUSDT"], D("5.10"), D("5"), D("0.00001"), D("0.00001"))

@@ -188,7 +188,13 @@ def plan_buy_quantity(
     if price <= 0 or budget_usdt <= 0:
         return None, "price_or_budget_non_positive"
 
-    qty = quantize_up(min_notional / price, step)
+    # 2026-11-03 实盘发现：从 minNotional 向上取整会让每一单都只落在
+    # 交易所最小合法量上（上限 8.00 却只用了 5.5），资金根本投不出去。
+    # 正确做法是**按预算向下取整**；只有当向下取整跌破 minNotional 时，
+    # 才回退到"最小合法量"那条路径（旧的 5 元上限场景正是这样）。
+    qty = quantize_down(budget_usdt / price, step)
+    if qty <= 0 or qty * price < min_notional:
+        qty = quantize_up(min_notional / price, step)
     if qty < min_qty:
         qty = quantize_up(min_qty, step)
     if qty <= 0:
