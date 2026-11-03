@@ -36,7 +36,7 @@ EXITCODE=3
 
 `canWithdraw = True`。
 
-这是 [ADR-0002](../adr/0002-binance-spot-as-venue.md) 里整个 CEX 方案的前提，也是 [07 R1](07-risks-and-blockers.md)。开着意味着：
+这是 [ADR-0002](adr/0002-binance-spot-as-venue.md) 里整个 CEX 方案的前提，也是 [07 R1](07-risks-and-blockers.md)。开着意味着：
 
 | | 现状 | 要求 |
 | --- | --- | --- |
