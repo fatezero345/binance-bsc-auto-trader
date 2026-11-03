@@ -185,11 +185,27 @@ class TestRiskGate(unittest.TestCase):
         self.assertFalse(d.approved)
         self.assertIn("account_cannot_trade", d.violations)
 
-    def test_extra_permissions_are_rejected(self):
+    def test_margin_permission_is_rejected(self):
         perms = AccountPermissions(True, False, False, ("SPOT", "MARGIN"))
         d = assess(intent(), state(), perms, self.p)
         self.assertFalse(d.approved)
-        self.assertTrue(any(v.startswith("account_permissions_not_subset") for v in d.violations))
+        self.assertIn("account_permission_forbidden:MARGIN", d.violations)
+
+    def test_trade_group_permission_is_accepted(self):
+        """2026-11-03 实测：真实账户返回 ["TRD_GRP_236"]。
+
+        纯 SPOT 白名单会把自己的账户误杀——这是真数据打出来的 bug，已改成
+        「允许清单（SPOT | TRD_GRP_<n>）+ 禁止词」双段判定。
+        """
+        perms = AccountPermissions(True, False, False, ("TRD_GRP_236",))
+        d = assess(intent(), state(), perms, self.p)
+        self.assertTrue(d.approved, d.violations)
+
+    def test_unknown_permission_marker_is_rejected(self):
+        perms = AccountPermissions(True, False, False, ("SOMETHING_NEW",))
+        d = assess(intent(), state(), perms, self.p)
+        self.assertFalse(d.approved)
+        self.assertTrue(any(v.startswith("account_permission_not_allowed") for v in d.violations))
 
     def test_observer_symbol_rejected_with_specific_reason(self):
         d = assess(intent("ETHUSDT", "0.0023", "5.18567"), state(), GOOD_PERMS, self.p)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass
 from decimal import ROUND_DOWN, Decimal
@@ -234,10 +235,17 @@ def assess(
         v.append("account_can_withdraw_must_be_false")
     if policy.binance_perms.get("require_can_trade", True) and not permissions.can_trade:
         v.append("account_cannot_trade")
-    allowed_perms = set(policy.binance_perms.get("require_permissions_subset_of", []))
-    extra = set(permissions.permissions) - allowed_perms
-    if extra:
-        v.append(f"account_permissions_not_subset:{sorted(extra)}")
+
+    # 权限标记：允许清单（SPOT / TRD_GRP_<n>）+ 禁止词，双段判定。
+    # 2026-11-03 实测：真实账户返回 ["TRD_GRP_236"]，纯 SPOT 白名单会误杀。
+    allowed = [re.compile(p) for p in policy.binance_perms.get("allow_permission_patterns", [])]
+    banned = {m.upper() for m in policy.binance_perms.get("forbidden_permission_markers", [])}
+    for perm in permissions.permissions:
+        up = perm.upper()
+        if any(b in up for b in banned):
+            v.append(f"account_permission_forbidden:{perm}")
+        elif allowed and not any(a.search(perm) for a in allowed):
+            v.append(f"account_permission_not_allowed:{perm}")
 
     # 4) 标的白名单
     if intent.symbol.upper() not in policy.symbols:

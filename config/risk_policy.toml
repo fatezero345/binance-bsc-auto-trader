@@ -28,7 +28,12 @@ archived = ["gmgn_bsc"]
 # /api/v3/account 的权限断言（P0 无法自行放宽，只能更严）
 require_can_trade = true
 require_can_withdraw_false = true      # ★ 最关键的一条：提币权必须关闭
-require_permissions_subset_of = ["SPOT"]   # 出现 MARGIN / LEVERAGED 即拒绝
+# 允许的权限标记（正则）：SPOT，或 Binance 区域性实体使用的交易组标记 TRD_GRP_<digits>。
+# 2026-11-03 实测：本账户返回 ["TRD_GRP_236"]，说明"只认 SPOT 子集"是过严的错判 ——
+# 真实账户会被自己的策略误杀。改为「允许清单 + 禁止词」双段判定。
+allow_permission_patterns = ["^SPOT$", "^TRD_GRP_[0-9]+$"]
+# 出现任一标记即拒绝（这些才是真正越界的权限）
+forbidden_permission_markers = ["MARGIN", "LEVERAGED", "FUTURES", "OPTIONS", "CONVERT", "EARN"]
 require_ip_whitelist = true            # 由人工在交易所侧确认，脚本只做记录
 # 明确禁止的交易模式（不是"没实现"，是"参数里没有这条路"）
 forbidden_modes = [

@@ -6,7 +6,7 @@
 
 | # | 任务书 §3 待确认项 | 结论 | 依据 |
 | --- | --- | --- | --- |
-| 1 | 是否支持只读余额查询 | ✅ **支持**（代码已实现，无 Key 故 BLOCKED） | `GET /api/v3/account`（签名只读） |
+| 1 | 是否支持只读余额查询 | ✅ **已实测通过**（2026-11-03，见 [03](03-holdings-snapshot.md)） | `GET /api/v3/account`（签名只读） |
 | 2 | 是否支持 BSC 网络 | **不适用** | ADR-0002：场所改为 CEX，无链概念；BSC 通路已归档 |
 | 3 | 是否支持交易模拟 | ✅ **支持，且强于 DEX** | `testnet.binance.vision` 真实撮合 + `[execution] dry_run` |
 | 4 | 是否支持 Swap | ✅ **支持** | `POST /api/v3/order`（P0 只开 `type=MARKET`） |
@@ -44,8 +44,8 @@ if policy.binance_perms.get("require_can_withdraw_false", True) and permissions.
 | Enable Reading | ✅ 必须开 | 否则读不到 `/api/v3/account`，「提币权是否关闭」无从验证 → 直接 BLOCKED |
 | Enable Spot & Margin Trading | ✅ 必须开（P0 只用到现货部分） | `require_can_trade = true` |
 | **Enable Withdrawals** | ❌ **必须关** | `require_can_withdraw_false = true` |
-| IP 访问限制 | ✅ 必须开（白名单到固定出口） | `require_ip_whitelist = true`（人工确认，脚本只记录） |
-| `permissions` 必须 ⊆ `["SPOT"]` | ✅ | 出现 `MARGIN` / `LEVERAGED` 即 `account_permissions_not_subset` |
+| IP 访问限制 | ⚠️ 未确认（Key 在本机可用，要么已白名单本机出口，要么根本没开——两者无法从 API 区分） | `require_ip_whitelist = true`（人工确认） |
+| `permissions` | ✅ 允许 `SPOT` 或 `TRD_GRP_<n>`，出现 `MARGIN`/`FUTURES`/`LEVERAGED` 即拒 | `allow_permission_patterns` + `forbidden_permission_markers`（实测账户返回 `TRD_GRP_236`） |
 
 ## 四、模拟能力：测试网是关键增量
 

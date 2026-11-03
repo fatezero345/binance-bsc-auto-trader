@@ -12,7 +12,7 @@ Binance 现货上的 AI 辅助自动投资系统。当前阶段：**P0 —— �
 | --- | --- |
 | P0 环境审计 | ✅ [docs/01](docs/01-environment-audit.md) |
 | P0 账户权限审计 | ⚠️ 八项已答，权限位未实测 [docs/02](docs/02-wallet-audit.md) |
-| P0 资产只读查询 | 🚫 BLOCKED：无 API Key [docs/03](docs/03-holdings-snapshot.md) |
+| P0 资产只读查询 | ✅ 已实测，结论不利：提币权开着 + 本金不在现货账户 [docs/03](docs/03-holdings-snapshot.md) |
 | P0 场所审计（过滤器 + 可行性） | ✅ [docs/04](docs/04-venue-audit.md) |
 | P0 系统架构 | ✅ [docs/05](docs/05-architecture.md) |
 | P0 目录结构 | ✅ 本仓库 |

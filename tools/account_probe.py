@@ -79,10 +79,17 @@ def main(argv: list[str]) -> int:
         problems.append("canWithdraw is TRUE -- revoke withdrawal permission before doing anything else")
     if not perms.can_trade:
         problems.append("canTrade is FALSE -- this key cannot trade at all")
-    allowed = set(policy.binance_perms.get("require_permissions_subset_of", []))
-    extra = set(perms.permissions) - allowed
-    if extra:
-        problems.append(f"permissions outside {sorted(allowed)}: {sorted(extra)}")
+    allowed_pats = policy.binance_perms.get("allow_permission_patterns", [])
+    banned = {m.upper() for m in policy.binance_perms.get("forbidden_permission_markers", [])}
+    import re as _re
+
+    compiled = [_re.compile(p) for p in allowed_pats]
+    for perm in perms.permissions:
+        up = perm.upper()
+        if any(b in up for b in banned):
+            problems.append(f"permission {perm!r} contains a forbidden marker")
+        elif compiled and not any(c.search(perm) for c in compiled):
+            problems.append(f"permission {perm!r} matches none of {allowed_pats}")
 
     if problems:
         for p in problems:
