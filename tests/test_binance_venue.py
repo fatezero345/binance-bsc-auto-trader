@@ -22,6 +22,7 @@ from src.execution.binance_spot import (  # noqa: E402
 from src.market.binance_public import parse_filters  # noqa: E402
 from src.risk import (  # noqa: E402
     AccountPermissions,
+    KeyFlags,
     Instrument,
     OrderIntent,
     Policy,
@@ -43,8 +44,25 @@ from src.wallet.binance_account import (  # noqa: E402
 
 D = Decimal
 CAKE = SymbolFilters("CAKEUSDT", "CAKE", "USDT", D("0.01"), D("0.01"), D("0.001"), D("5"))
-GOOD = AccountPermissions(True, False, False, ("SPOT",))
-BAD_WITHDRAW = AccountPermissions(True, True, True, ("SPOT",))
+SAFE_KEY = KeyFlags(
+    enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
+    enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+    enable_vanilla_options=False, permits_universal_transfer=False,
+    enable_portfolio_margin=False, ip_restrict=True,
+)
+
+def _unsafe_withdraw() -> KeyFlags:
+    """same key but with the withdrawal flag left open."""
+    return KeyFlags(
+        enable_reading=True, enable_spot_trading=True, enable_withdrawals=True,
+        enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+        enable_vanilla_options=False, permits_universal_transfer=False,
+        enable_portfolio_margin=False, ip_restrict=True,
+    )
+
+
+GOOD = AccountPermissions(True, False, False, ("SPOT",), SAFE_KEY)
+BAD_WITHDRAW = AccountPermissions(True, True, True, ("SPOT",), _unsafe_withdraw())
 
 
 def make_intent() -> OrderIntent:
@@ -123,7 +141,7 @@ class TestExecutionBoundary(unittest.TestCase):
         policy, gate = open_gate(mainnet=True)
         plan = build_order_params(make_intent(), policy, gate, BAD_WITHDRAW)
         self.assertFalse(plan.would_submit)
-        self.assertIn("account_can_withdraw_must_be_false", plan.reasons)
+        self.assertIn("key_flag_dangerous:enable_withdrawals", plan.reasons)
 
     def test_off_step_quantity_blocked_at_build(self):
         policy, gate = open_gate()

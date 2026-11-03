@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.risk import (  # noqa: E402
     AccountPermissions,
+    KeyFlags,
     Instrument,
     OrderIntent,
     Policy,
@@ -43,7 +44,17 @@ FILTERS = {
 }
 PRICE = {"BTCUSDT": D("76842.01"), "BNBUSDT": D("696.53"), "CAKEUSDT": D("1.844"), "ETHUSDT": D("2254.64")}
 
-GOOD_PERMS = AccountPermissions(can_trade=True, can_withdraw=False, can_deposit=False, permissions=("SPOT",))
+SAFE_KEY = KeyFlags(
+    enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
+    enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+    enable_vanilla_options=False, permits_universal_transfer=False,
+    enable_portfolio_margin=False, ip_restrict=True,
+)
+
+GOOD_PERMS = AccountPermissions(
+    can_trade=True, can_withdraw=False, can_deposit=False,
+    permissions=("SPOT",), key=SAFE_KEY,
+)
 
 
 def intent(symbol: str = "CAKEUSDT", qty: str = "2.72", notional: str = "5.01568", **over) -> OrderIntent:
@@ -172,21 +183,72 @@ class TestRiskGate(unittest.TestCase):
         d = assess(intent(), state(), GOOD_PERMS, self.p)
         self.assertTrue(d.approved, d.violations)
 
-    def test_account_withdraw_enabled_is_rejected(self):
-        """ADR-0002 的核心：提币权必须关闭，否则整个 CEX 方案不成立。"""
-        perms = AccountPermissions(True, True, True, ("SPOT",))
+    def test_key_withdraw_flag_open_is_rejected(self):
+        """ADR-0002 的核心：**Key 级**提币权必须关闭，否则整个 CEX 方案不成立。"""
+        unsafe = KeyFlags(
+            enable_reading=True, enable_spot_trading=True, enable_withdrawals=True,
+            enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+            enable_vanilla_options=False, permits_universal_transfer=False,
+            enable_portfolio_margin=False, ip_restrict=True,
+        )
+        perms = AccountPermissions(True, False, False, ("SPOT",), unsafe)
         d = assess(intent(), state(), perms, self.p)
         self.assertFalse(d.approved)
-        self.assertIn("account_can_withdraw_must_be_false", d.violations)
+        self.assertIn("key_flag_dangerous:enable_withdrawals", d.violations)
+
+    def test_account_level_can_withdraw_alone_is_not_a_violation(self):
+        """2026-11-03 实测：账户 canWithdraw=True 而 Key 的 enableWithdrawals=False。
+
+        账户级字段描述账户能力，不是这把 Key 的开关。以它为准会误报，
+        导致用户关掉提币权后仍被拦住（这正是本次踩到的坑）。
+        """
+        perms = AccountPermissions(True, True, True, ("SPOT",), SAFE_KEY)
+        d = assess(intent(), state(), perms, self.p)
+        self.assertTrue(d.approved, d.violations)
+
+    def test_r14_futures_and_transfer_flags_are_rejected(self):
+        for flag in ("enable_futures", "enable_internal_transfer", "enable_margin",
+                     "permits_universal_transfer", "enable_portfolio_margin",
+                     "enable_vanilla_options"):
+            with self.subTest(flag=flag):
+                kw = dict(
+                    enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
+                    enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+                    enable_vanilla_options=False, permits_universal_transfer=False,
+                    enable_portfolio_margin=False, ip_restrict=True,
+                )
+                kw[flag] = True
+                perms = AccountPermissions(True, False, False, ("SPOT",), KeyFlags(**kw))
+                d = assess(intent(), state(), perms, self.p)
+                self.assertFalse(d.approved)
+                self.assertIn(f"key_flag_dangerous:{flag}", d.violations)
+
+    def test_missing_key_flags_fail_closed(self):
+        perms = AccountPermissions(True, False, False, ("SPOT",), None)
+        d = assess(intent(), state(), perms, self.p)
+        self.assertFalse(d.approved)
+        self.assertIn("key_permissions_unavailable", d.violations)
+
+    def test_ip_restrict_disabled_is_rejected(self):
+        no_ip = KeyFlags(
+            enable_reading=True, enable_spot_trading=True, enable_withdrawals=False,
+            enable_internal_transfer=False, enable_futures=False, enable_margin=False,
+            enable_vanilla_options=False, permits_universal_transfer=False,
+            enable_portfolio_margin=False, ip_restrict=False,
+        )
+        perms = AccountPermissions(True, False, False, ("SPOT",), no_ip)
+        d = assess(intent(), state(), perms, self.p)
+        self.assertFalse(d.approved)
+        self.assertIn("key_ip_restrict_disabled", d.violations)
 
     def test_account_cannot_trade_is_rejected(self):
-        perms = AccountPermissions(False, False, False, ("SPOT",))
+        perms = AccountPermissions(False, False, False, ("SPOT",), SAFE_KEY)
         d = assess(intent(), state(), perms, self.p)
         self.assertFalse(d.approved)
         self.assertIn("account_cannot_trade", d.violations)
 
     def test_margin_permission_is_rejected(self):
-        perms = AccountPermissions(True, False, False, ("SPOT", "MARGIN"))
+        perms = AccountPermissions(True, False, False, ("SPOT", "MARGIN"), SAFE_KEY)
         d = assess(intent(), state(), perms, self.p)
         self.assertFalse(d.approved)
         self.assertIn("account_permission_forbidden:MARGIN", d.violations)
@@ -197,12 +259,12 @@ class TestRiskGate(unittest.TestCase):
         纯 SPOT 白名单会把自己的账户误杀——这是真数据打出来的 bug，已改成
         「允许清单（SPOT | TRD_GRP_<n>）+ 禁止词」双段判定。
         """
-        perms = AccountPermissions(True, False, False, ("TRD_GRP_236",))
+        perms = AccountPermissions(True, False, False, ("TRD_GRP_236",), SAFE_KEY)
         d = assess(intent(), state(), perms, self.p)
         self.assertTrue(d.approved, d.violations)
 
     def test_unknown_permission_marker_is_rejected(self):
-        perms = AccountPermissions(True, False, False, ("SOMETHING_NEW",))
+        perms = AccountPermissions(True, False, False, ("SOMETHING_NEW",), SAFE_KEY)
         d = assess(intent(), state(), perms, self.p)
         self.assertFalse(d.approved)
         self.assertTrue(any(v.startswith("account_permission_not_allowed") for v in d.violations))

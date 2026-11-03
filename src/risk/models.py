@@ -87,16 +87,54 @@ class PortfolioState:
 
 
 @dataclass(frozen=True)
-class AccountPermissions:
-    """来自 GET /api/v3/account 的权限事实。
+class KeyFlags:
+    """**这把 API Key 自己**的权限位，来自 GET /sapi/v1/account/apiRestrictions。
 
-    这是 CEX 模型下最重要的一道结构性检查：提币权必须是关的。
+    为什么必须区分账户级与 Key 级：
+      * ``/api/v3/account`` 的 ``canWithdraw`` 描述的是**账户**能力；
+      * 本对象描述的是**这把 Key** 能做什么。
+    2026-11-03 实测：账户 ``canWithdraw=True``，而 Key 的 ``enableWithdrawals=False``
+    —— 用户已经关了提币权，读错字段的检查会误报。
+    """
+
+    enable_reading: bool
+    enable_spot_trading: bool
+    enable_withdrawals: bool
+    enable_internal_transfer: bool
+    enable_futures: bool
+    enable_margin: bool
+    enable_vanilla_options: bool
+    permits_universal_transfer: bool
+    enable_portfolio_margin: bool
+    ip_restrict: bool
+
+    def dangerous(self) -> tuple[str, ...]:
+        """返回所有「开着的危险开关」。空元组才算干净。"""
+        pairs = {
+            "enable_withdrawals": self.enable_withdrawals,
+            "enable_internal_transfer": self.enable_internal_transfer,
+            "enable_futures": self.enable_futures,
+            "enable_margin": self.enable_margin,
+            "enable_vanilla_options": self.enable_vanilla_options,
+            "permits_universal_transfer": self.permits_universal_transfer,
+            "enable_portfolio_margin": self.enable_portfolio_margin,
+        }
+        return tuple(k for k, v in pairs.items() if v)
+
+
+@dataclass(frozen=True)
+class AccountPermissions:
+    """账户级权限（来自 GET /api/v3/account）+ Key 级权限位。
+
+    ``key`` 为 None 表示没有读到 Key 级权限位 —— 按 fail_closed 处理，
+    由 assess() 直接拒绝，绝不当成"没有危险开关"。
     """
 
     can_trade: bool
     can_withdraw: bool
     can_deposit: bool
     permissions: tuple[str, ...] = ()
+    key: KeyFlags | None = None
 
 
 @dataclass(frozen=True)

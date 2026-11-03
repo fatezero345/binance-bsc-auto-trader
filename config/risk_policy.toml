@@ -25,9 +25,22 @@ max_clock_skew_ms = 1000
 archived = ["gmgn_bsc"]
 
 [venue.binance]
-# /api/v3/account 的权限断言（P0 无法自行放宽，只能更严）
+# /api/v3/account 与 /sapi/v1/account/apiRestrictions 的权限断言
 require_can_trade = true
-require_can_withdraw_false = true      # ★ 最关键的一条：提币权必须关闭
+# ★ 必须按 **Key 级** 权限位判定，不能用账户级 canWithdraw。
+#   2026-11-03 实测：账户 canWithdraw=True，而 Key 的 enableWithdrawals=False
+#   —— 读错字段会误报"提币权开着"。
+require_ip_restrict = true             # 必须开 IP 白名单
+# 任何一项为 true 即拒绝下单。这份清单是"越界"的定义。
+forbidden_key_flags = [
+  "enable_withdrawals",          # 提币
+  "enable_internal_transfer",    # 内部划转（能在自己的钱包/子账户之间搬钱）
+  "enable_futures",              # 合约
+  "enable_margin",               # 杠杆
+  "enable_vanilla_options",      # 期权
+  "permits_universal_transfer",  # 万能划转
+  "enable_portfolio_margin",     # 组合保证金
+]
 # 允许的权限标记（正则）：SPOT，或 Binance 区域性实体使用的交易组标记 TRD_GRP_<digits>。
 # 2026-11-03 实测：本账户返回 ["TRD_GRP_236"]，说明"只认 SPOT 子集"是过严的错判 ——
 # 真实账户会被自己的策略误杀。改为「允许清单 + 禁止词」双段判定。

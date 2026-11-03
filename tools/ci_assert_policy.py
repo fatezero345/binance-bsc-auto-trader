@@ -61,8 +61,13 @@ def main() -> int:
 
     # --- CEX 模型的安全前提 ---
     perms = policy.binance_perms
-    if not perms.get("require_can_withdraw_false", False):
-        failures.append("require_can_withdraw_false must stay true -- this is the whole point")
+    flags = set(perms.get("forbidden_key_flags", []))
+    if "enable_withdrawals" not in flags:
+        failures.append("forbidden_key_flags must still contain enable_withdrawals")
+    if "enable_futures" not in flags:
+        failures.append("forbidden_key_flags must still contain enable_futures")
+    if not perms.get("require_ip_restrict", False):
+        failures.append("require_ip_restrict must stay true")
 
     # --- 可行窗口：交易所下限 < 本项目硬上限（严格小于，否则窗口为空）---
     if policy.min_notional >= policy.notional_ceiling:

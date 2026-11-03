@@ -1,102 +1,116 @@
-# 03 资产只读查询结果
+# 03 账户与 Key 权限实测
 
-**状态：✅ 已实测（2026-11-03 13:4x +0800）。结论是坏的，但它是真的。**
+**状态：✅ 已实测（2026-11-03 13:4x 两次采样）。提币权已关闭；但还有三项没过，本金也不在现货账户。**
 
-## 一、实测输出
+## 一、先更正上一版的一个错误
+
+上一版我写「`canWithdraw = True`，提币权开着」。**这个判断读错了字段。**
+
+| 字段 | 来源 | 含义 |
+| --- | --- | --- |
+| `canWithdraw` | `/api/v3/account` | **账户**能不能提币 |
+| `enableWithdrawals` | `/sapi/v1/account/apiRestrictions` | **这把 Key** 能不能提币 |
+
+所有者确实关掉了 Key 的提币权（`enableWithdrawals=False`），但我读的是账户级字段，于是误报成"没关"。已修：`assess()`、`build_order_params()`、`account_probe.py` 全部改为以 **Key 级**权限位为准，并且 Key 级读不到时 **fail_closed**（`key_permissions_unavailable`），不当成"没危险"。
+
+这条被测试钉住：`test_account_level_can_withdraw_alone_is_not_a_violation` / `test_key_withdraw_flag_open_is_rejected` / `test_missing_key_flags_fail_closed`。
+
+## 二、实测输出（2026-11-03 13:4x）
 
 ```
-$ python tools/account_probe.py
-target = https://api.binance.com
-
-=== credentials ===
-BINANCE_API_KEY present (len=64), secret present (len=64)
-
-=== account permissions (must-have: canWithdraw == False) ===
+=== account (GET /api/v3/account) ===
 canTrade    = True
-canWithdraw = True      <-- MUST be False
+canWithdraw = True   <-- ACCOUNT-level, not the key's flag
 canDeposit  = True
 permissions = ['TRD_GRP_236']
 
-=== balances (read-only) ===
+=== key flags (GET /sapi/v1/account/apiRestrictions)  <-- authoritative ===
+enableReading                = True
+enableSpotAndMarginTrading   = True
+ipRestrict                   = False   <-- must be True
+--- these must ALL be False ---
+enableWithdrawals              = False   ✅
+enableInternalTransfer         = True    ❌ OPEN
+enableFutures                  = True    ❌ OPEN
+enableMargin                   = False
+enableVanillaOptions           = False
+permitsUniversalTransfer       = False
+enablePortfolioMarginTrading   = False
+
+=== balances (spot wallet only) ===
 BNB   free = 0.00000000
 USDT  free = 0.00000142
 
-=== verdict ===
-  !! canWithdraw is TRUE -- revoke withdrawal permission before doing anything else
-
-STOP. The account does not satisfy the P0 safety precondition.
-EXITCODE=3
+EXITCODE = 3
 ```
 
-密钥只在这一次进程的环境变量里存在，跑完即清除；未落盘、未回显、未进 git。
+## 三、还差三件事（探针退出码仍为 3）
 
-## 二、两条硬结论
+### 1. 🔴 `enableFutures = True` —— 这条比提币权更危险
 
-### 1. 🚫 提币权是开着的 —— 安全前提不成立
+合约权限开着，意味着这个 Key **可以在合约市场开杠杆仓**。而本项目整个风控模型只覆盖现货市价单：
 
-`canWithdraw = True`。
+| 风控假设 | 合约开仓后的现实 |
+| --- | --- |
+| 单笔 ≤ 5.05 USDT | 合约可以开 10x / 20x，名义敞口 = 保证金的 10–20 倍 |
+| 累计亏损 1.50 USDT 熔断 | 强平可以一次亏掉全部保证金，绕过熔断 |
+| 只做现货，无杠杆 | 直接违反 `[forbidden].leverage / derivatives = false` |
 
-这是 [ADR-0002](adr/0002-binance-spot-as-venue.md) 里整个 CEX 方案的前提，也是 [07 R1](07-risks-and-blockers.md)。开着意味着：
+**本地代码管不到这条路**——它不经过 `src/execution/`，是 Key 自身的能力。所以必须在 Key 上关掉。
 
-| | 现状 | 要求 |
-| --- | --- | --- |
-| Key 泄漏后的最坏后果 | 资金被**转走**，账户清零 | 只能被"乱交易"，损失上界 5.05 USDT + 熔断 1.50 |
+### 2. 🟠 `enableInternalTransfer = True` —— 内部划转
 
-`account_probe.py` 按设计以**退出码 3** 停下，没有继续做任何事。风控闸门在这里第一次拦住了真实世界的错误配置——这正是它存在的理由。
+能在自己的钱包 / 子账户之间搬钱。搬不出平台，但也超出了"只做一笔 5 USDT 现货"的授权范围。
 
-**必须做的事**：Binance → API 管理 → 编辑该 Key → 取消勾选 **Enable Withdrawals** → 保存。然后重跑探针，必须看到 `canWithdraw = False` 且退出码 0。
+### 3. 🟠 `ipRestrict = False` —— 没开 IP 白名单
 
-### 2. 🚫 本金不在这个现货账户里
+Key 现在从任何 IP 都可用。这把 Key 已经出现在对话记录里，没有 IP 约束等于没有第二道地理门槛。
+
+## 四、操作清单
+
+Binance → API 管理 → 编辑该 Key：
+
+- [x] **Enable Withdrawals** → 已取消（`enableWithdrawals=False` 已确认）
+- [ ] **Enable Futures** → **取消勾选**（必须）
+- [ ] **Enable Internal Transfer** → 取消勾选
+- [ ] **Restrict access to trusted IPs only** → 勾上，填本机出口 IP
+- [x] Enable Reading → 保持
+- [x] Enable Spot & Margin Trading → 保持
+
+改完重跑：
 
 ```
-USDT free = 0.00000142      （0.00000142，不是 29.30）
+python tools/account_probe.py     # 目标：EXITCODE=0
+```
+
+## 五、本金仍然不在现货账户
+
+```
+USDT free = 0.00000142      （不是 29.30）
 BNB  free = 0.00000000
 ```
 
-计划投入的 29.30 USDT **在这个 Key 能看到的现货账户里不存在**。
+`/api/v3/account` 只返回**现货钱包**。USDT 可能停在资金钱包（Funding Wallet）——**推测，未实测**。当前 `READ_ONLY_PATHS` 里没有资金钱包查询接口，所以这一点现在查不了。
 
-`/api/v3/account` 只返回**现货钱包**余额。Binance 另有资金钱包（Funding Wallet），USDT 很可能停在那里——但那是**推测，不是实测**。在确认之前，本节不能声称"有 29.30 USDT"。
+两条路：
 
-需要下一步确认（二选一）：
+1. 人工在 App 里看「资金账户」，有就划转到现货账户；
+2. 或把 `capital.initial_equity_usdt` 改成本节实测值（会连带重算 P3 资金闸——0.00000142 USDT 连 5 USDT 的交易所下限都够不着，等于不能交易）。
 
-- 人工在 App 里看「资金账户」余额；
-- 或用 `READ_ONLY_PATHS` 里的 `/sapi/v1/capital/config/getall` 之外再加一条资金钱包查询（当前白名单没有，需要新增并评审）。
+在确认之前，任何"当前资产 29.30 USDT"的说法都不成立。
 
-## 三、附带修掉的一个真实 bug
-
-`permissions = ['TRD_GRP_236']` —— 不是 `['SPOT']`。
-
-策略原本要求 `permissions ⊆ ["SPOT"]`，这会把**自己的真实账户误杀**。这是真数据打出来的，不是想出来的。已改为「允许清单 + 禁止词」双段判定：
-
-```toml
-allow_permission_patterns  = ["^SPOT$", "^TRD_GRP_[0-9]+$"]
-forbidden_permission_markers = ["MARGIN", "LEVERAGED", "FUTURES", "OPTIONS", "CONVERT", "EARN"]
-```
-
-`TRD_GRP_<n>` 是 Binance 区域性实体使用的交易组标记，仍然只映射到现货。测试 `test_trade_group_permission_is_accepted` 把它钉住，`test_unknown_permission_marker_is_rejected` 保证新出现的未知标记仍然被拒（宁可误杀不可放过）。
-
-## 四、任务书 §4.3 的三项，逐个交代
-
-| 要求 | 状态 | 实测值 |
-| --- | --- | --- |
-| 钱包地址 | **N/A**（CEX） | 无链上地址；见 ADR-0002 |
-| Chain ID（应为 56） | **N/A**（CEX） | 该项在 CEX 模式下失去意义 |
-| USDT 余额 | ✅ **已实测** | **0.00000142**（不是 29.30） |
-| BNB 余额 | ✅ **已实测** | **0.00000000** |
-
-上一版这一节写的是 BLOCKED 而不是 0 —— 当时的判断是对的：没有凭据时"读不到"绝不能写成"余额为零"。现在读到了，数字就是 0.00000142。
-
-## 五、密钥卫生
+## 六、密钥卫生
 
 - 密钥只作为**单次进程**的环境变量传入，命令结束即 `Remove-Item`；
-- 未写入任何文件、未进 git（`.gitignore` 排除 `.env*`）、未出现在任何输出里；
-- 探针只打印 `len=64`，从不打印内容；
-- 该 Key 已出现在本次对话记录中。若这份记录会外流，**跑完诊断后应轮换一把新的**。
+- 未写入任何文件、未进 git、未出现在任何输出里（探针只打印 `len=64`）；
+- 该 Key 已出现在本次对话记录中。**跑完全部诊断后应轮换一把新的**——尤其 `ipRestrict` 还是 false 的现在。
 
-## 六、解除条件
+## 七、这一轮真正的收获
 
-1. 关掉 `Enable Withdrawals`（必须）；
-2. 确认 29.30 USDT 的实际位置（现货钱包 or 资金钱包），把它划到现货钱包，或把本金规模改成本节实测值（这会连带重算 P3 的资金闸）；
-3. 重跑 `python tools/account_probe.py`，必须 `canWithdraw = False` 且退出码 0。
+不是"又发现三个开关"，而是**风控第一次被真实数据证伪并当场修好**：
 
-在这三条满足之前，`docs/06` 的 P1 门不过，不得进入 P2。
+1. 账户级 vs Key 级权限字段混用 → 误报，已改成 Key 级 + fail_closed；
+2. `permissions` 白名单过严（只认 `SPOT`）→ 误杀真实账户（`TRD_GRP_236`），已改成允许清单 + 禁止词；
+3. 危险开关的清单从"提币一项"扩到**七项**（提币 / 内部划转 / 合约 / 杠杆 / 期权 / 万能划转 / 组合保证金），每一项都有独立测试。
+
+测试数从 56 → **65**，全部离线可跑。

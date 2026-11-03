@@ -69,8 +69,15 @@ def build_order_params(
     if decision is not None and not decision.approved:
         reasons.extend(decision.violations)
 
-    if permissions.can_withdraw:
-        reasons.append("account_can_withdraw_must_be_false")
+    # Key 级权限：危险开关必须全关。第二道同样的检查（assess 里是第一道）。
+    key = permissions.key
+    if key is None:
+        reasons.append("key_permissions_unavailable")
+    else:
+        for flag in key.dangerous():
+            reasons.append(f"key_flag_dangerous:{flag}")
+        if not key.ip_restrict:
+            reasons.append("key_ip_restrict_disabled")
 
     side = "BUY" if intent.side is Side.BUY else "SELL"
     if intent.instrument.value != "spot":

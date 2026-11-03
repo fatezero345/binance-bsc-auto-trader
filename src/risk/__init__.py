@@ -3,6 +3,7 @@
 from .models import (
     AccountPermissions,
     ExecutionGate,
+    KeyFlags,
     Instrument,
     OrderIntent,
     PortfolioState,
@@ -26,6 +27,7 @@ from .policy import (
 __all__ = [
     "AccountPermissions",
     "ExecutionGate",
+    "KeyFlags",
     "Instrument",
     "OrderIntent",
     "Policy",

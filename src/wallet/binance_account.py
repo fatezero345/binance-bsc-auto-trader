@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Mapping
 
-from src.risk.models import AccountPermissions
+from src.risk.models import AccountPermissions, KeyFlags
 
 DEFAULT_BASE = "https://api.binance.com"
 USER_AGENT = "binance-bsc-auto-trader/p0"
@@ -34,6 +34,9 @@ READ_ONLY_PATHS: frozenset[str] = frozenset(
         "/api/v3/openOrders",
         "/api/v3/myTrades",
         "/sapi/v1/capital/config/getall",
+        # ★ 每一把 Key 自己的权限位。比 /api/v3/account 的 canWithdraw 更权威：
+        #   canWithdraw 可能反映账户能力，enableWithdrawals 才是这把 Key 的开关。
+        "/sapi/v1/account/apiRestrictions",
     }
 )
 
@@ -114,3 +117,75 @@ def balances(account: dict, assets: tuple[str, ...] = ("USDT", "BNB")) -> dict[s
         if b.get("asset") in assets:
             out[b["asset"]] = b.get("free", "0")
     return out
+
+
+# ---------------------------------------------------------------- 每把 Key 的权限位
+
+# 真正危险的开关：出现任意一个为 True 都意味着这把 Key 超出本项目的授权范围
+RISKY_KEYS = (
+    "enableWithdrawals",
+    "enableInternalTransfer",
+    "enableFutures",
+    "enableMargin",
+    "enableVanillaOptions",
+    "permitsUniversalTransfer",
+    "enablePortfolioMarginTrading",
+)
+
+
+def get_api_restrictions(api_key: str, api_secret: str, *, base: str = DEFAULT_BASE) -> dict:
+    """GET /sapi/v1/account/apiRestrictions —— 这把 Key 自己的权限位。
+
+    这是判断「提币权到底关没关」的权威来源：
+      * ``/api/v3/account`` 的 ``canWithdraw`` 描述的是**账户**能力，不是 Key 的开关；
+      * 本接口的 ``enableWithdrawals`` 才是**这把 Key**的提币权限。
+    两者可能不一致，不一致时必须按更严格的那个处理。
+    """
+    return read(
+        "/sapi/v1/account/apiRestrictions", {}, api_key=api_key, api_secret=api_secret, base=base
+    )
+
+
+def risky_flags(restrictions: dict) -> dict[str, bool]:
+    """把危险开关挑出来。缺字段不等于关闭——缺字段单独报告。"""
+    return {k: bool(restrictions[k]) for k in RISKY_KEYS if k in restrictions}
+
+
+def permissions_from_restrictions(restrictions: dict) -> KeyFlags:
+    """把 /sapi/v1/account/apiRestrictions 映射成 KeyFlags。
+
+    缺字段一律按 **True**（危险）处理：读不到就是不知道，不知道就不能放行。
+    """
+    def flag(name: str, missing_default: bool) -> bool:
+        return bool(restrictions[name]) if name in restrictions else missing_default
+
+    return KeyFlags(
+        enable_reading=flag("enableReading", False),
+        enable_spot_trading=flag("enableSpotAndMarginTrading", False),
+        enable_withdrawals=flag("enableWithdrawals", True),
+        enable_internal_transfer=flag("enableInternalTransfer", True),
+        enable_futures=flag("enableFutures", True),
+        enable_margin=flag("enableMargin", True),
+        enable_vanilla_options=flag("enableVanillaOptions", True),
+        permits_universal_transfer=flag("permitsUniversalTransfer", True),
+        enable_portfolio_margin=flag("enablePortfolioMarginTrading", True),
+        ip_restrict=flag("ipRestrict", False),
+    )
+
+
+def full_permissions(api_key: str, api_secret: str, *, base: str = DEFAULT_BASE) -> AccountPermissions:
+    """一次读齐账户级 + Key 级权限，供风控使用。"""
+    account = get_account(api_key, api_secret, base=base)
+    base_perms = permissions_from_account(account)
+    try:
+        restrictions = get_api_restrictions(api_key, api_secret, base=base)
+        key = permissions_from_restrictions(restrictions)
+    except WalletError:
+        key = None                    # 读不到 Key 级权限 → assess() 会 fail_closed
+    return AccountPermissions(
+        can_trade=base_perms.can_trade,
+        can_withdraw=base_perms.can_withdraw,
+        can_deposit=base_perms.can_deposit,
+        permissions=base_perms.permissions,
+        key=key,
+    )

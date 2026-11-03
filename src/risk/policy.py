@@ -230,11 +230,26 @@ def assess(
     if intent.instrument.value in forbidden_modes:
         v.append(f"forbidden_mode:{intent.instrument.value}")
 
-    # 3) 账户权限：提币必须关闭（CEX 模型下最关键的一条）
-    if policy.binance_perms.get("require_can_withdraw_false", True) and permissions.can_withdraw:
-        v.append("account_can_withdraw_must_be_false")
+    # 3) 账户与 Key 权限
     if policy.binance_perms.get("require_can_trade", True) and not permissions.can_trade:
         v.append("account_cannot_trade")
+
+    # ★ 提币权与所有危险开关，一律以 **Key 级**权限位为准。
+    #   账户级 canWithdraw 不等于这把 Key 能不能提币（2026-11-03 实测两者不一致）。
+    key = permissions.key
+    if key is None:
+        v.append("key_permissions_unavailable")
+    else:
+        banned_key_flags = set(policy.binance_perms.get("forbidden_key_flags", []))
+        for flag in key.dangerous():
+            if not banned_key_flags or flag in banned_key_flags:
+                v.append(f"key_flag_dangerous:{flag}")
+        if policy.binance_perms.get("require_ip_restrict", True) and not key.ip_restrict:
+            v.append("key_ip_restrict_disabled")
+        if not key.enable_reading:
+            v.append("key_reading_disabled")
+        if not key.enable_spot_trading:
+            v.append("key_spot_trading_disabled")
 
     # 权限标记：允许清单（SPOT / TRD_GRP_<n>）+ 禁止词，双段判定。
     # 2026-11-03 实测：真实账户返回 ["TRD_GRP_236"]，纯 SPOT 白名单会误杀。

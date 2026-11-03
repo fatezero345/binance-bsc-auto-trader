@@ -43,8 +43,10 @@ if policy.binance_perms.get("require_can_withdraw_false", True) and permissions.
 | --- | --- | --- |
 | Enable Reading | ✅ 必须开 | 否则读不到 `/api/v3/account`，「提币权是否关闭」无从验证 → 直接 BLOCKED |
 | Enable Spot & Margin Trading | ✅ 必须开（P0 只用到现货部分） | `require_can_trade = true` |
-| **Enable Withdrawals** | ❌ **必须关** | `require_can_withdraw_false = true` |
-| IP 访问限制 | ⚠️ 未确认（Key 在本机可用，要么已白名单本机出口，要么根本没开——两者无法从 API 区分） | `require_ip_whitelist = true`（人工确认） |
+| **Enable Withdrawals** | ❌ **必须关**（实测已关 ✅） | `forbidden_key_flags` 含 `enable_withdrawals` |
+| **Enable Futures** | ❌ **必须关**（实测仍开 ❌，比提币更危险） | `forbidden_key_flags` 含 `enable_futures` |
+| **Enable Internal Transfer** | ❌ **必须关**（实测仍开 ❌） | `forbidden_key_flags` 含 `enable_internal_transfer` |
+| IP 访问限制 | ❌ **实测未开**（`ipRestrict=False`） | `require_ip_restrict = true` → `key_ip_restrict_disabled` |
 | `permissions` | ✅ 允许 `SPOT` 或 `TRD_GRP_<n>`，出现 `MARGIN`/`FUTURES`/`LEVERAGED` 即拒 | `allow_permission_patterns` + `forbidden_permission_markers`（实测账户返回 `TRD_GRP_236`） |
 
 ## 四、模拟能力：测试网是关键增量
