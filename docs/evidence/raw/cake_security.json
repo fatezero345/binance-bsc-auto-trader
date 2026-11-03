@@ -1,0 +1,42 @@
+﻿{
+  "address": "0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82",
+  "is_show_alert": false,
+  "top_10_holder_rate": "0.0315",
+  "burn_ratio": "0",
+  "burn_status": "",
+  "dev_token_burn_amount": "0",
+  "dev_token_burn_ratio": "0",
+  "is_open_source": true,
+  "open_source": 1,
+  "is_blacklist": false,
+  "blacklist": 0,
+  "is_honeypot": false,
+  "honeypot": 0,
+  "is_renounced": true,
+  "renounced": 1,
+  "renounced_freeze_account": false,
+  "renounced_mint": false,
+  "can_sell": 0,
+  "can_not_sell": 0,
+  "buy_tax": "0",
+  "sell_tax": "0",
+  "average_tax": "0",
+  "high_tax": "0",
+  "flags": [],
+  "lockInfo": null,
+  "lock_summary": {
+    "is_locked": true,
+    "lock_detail": [
+      {
+        "percent": "0.95",
+        "pool": "0x0000000000000000000000000000000000000000",
+        "is_blackhole": true
+      }
+    ],
+    "lock_tags": null,
+    "lock_percent": "0.95",
+    "left_lock_percent": "0.05"
+  },
+  "hide_risk": false,
+  "privileges": null
+}

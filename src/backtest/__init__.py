@@ -1,0 +1,1 @@
+"""Historical replay over kline/pool data. Pure computation, no network writes."""

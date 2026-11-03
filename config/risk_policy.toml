@@ -1,0 +1,94 @@
+# 硬风控策略 —— P0 任务书 §5「安全边界」的机器可读形态。
+#
+# v2（ADR-0002）：交易场所由 GMGN/BSC DEX 改为 **Binance 现货（CEX）**。
+#
+# 纪律（写进代码，不写进提示词）：
+#   1. 本文件每一项都必须由 src/risk/ 读取并拒绝违规意图；
+#      任何"我们会在提示词里提醒模型"的做法都视为未实现。
+#   2. fail_closed：读不到本文件、字段缺失、值非法，一律拒绝下单。
+#   3. 用 TOML 而非 YAML，是为了 stdlib tomllib（Python >=3.11）零依赖可读。
+
+[capital]
+initial_equity_usdt = 29.30
+base_currency = "USDT"
+
+[venue]
+# 唯一允许的交易场所。见 docs/adr/0002-binance-spot-as-venue.md
+primary = "binance_spot"
+base_url = "https://api.binance.com"
+# 演练优先用测试网；测试网账户与主网资产完全隔离
+testnet_base_url = "https://testnet.binance.vision"
+recv_window_ms = 5000
+# 本机时钟与服务器偏差上限。2026-11-03 实测 -163 ms，留 6 倍余量
+max_clock_skew_ms = 1000
+# 已归档的旧场所：代码保留，但不得被启用（CI 断言）
+archived = ["gmgn_bsc"]
+
+[venue.binance]
+# /api/v3/account 的权限断言（P0 无法自行放宽，只能更严）
+require_can_trade = true
+require_can_withdraw_false = true      # ★ 最关键的一条：提币权必须关闭
+require_permissions_subset_of = ["SPOT"]   # 出现 MARGIN / LEVERAGED 即拒绝
+require_ip_whitelist = true            # 由人工在交易所侧确认，脚本只做记录
+# 明确禁止的交易模式（不是"没实现"，是"参数里没有这条路"）
+forbidden_modes = [
+  "margin",
+  "isolated_margin",
+  "futures",
+  "leverage_token",
+  "withdraw",
+  "transfer",
+  "universal_transfer",
+  "convert",
+  "earn",
+  "loan",
+]
+
+[order_limits]
+max_notional_per_order_usdt = 10.00
+max_risk_budget_per_order_usdt = 0.30
+max_slippage_bps = 300            # 3.00%
+# CEX 没有 gas，但有手续费。按 0.1% taker 计，10 USDT 单边 0.01 USDT
+max_fee_bps = 20                  # 0.20% 上限；实际费率以 /api/v3/account 为准
+# 交易所侧硬下限。P0 实测四个候选对均为 5.00 USDT（见 docs/04）
+min_notional_usdt = 5.00
+# 量化失败（步长把单子挤到 minNotional 之下或上限之上）的处理：拒绝，不四舍五入
+quantization_failure = "reject"
+
+[portfolio]
+max_open_positions = 1
+max_position_notional_usdt = 10.00
+
+[circuit_breaker]
+max_cumulative_realized_loss_usdt = 1.50
+mode = "fail_closed"              # 触发后拒绝一切新订单，直到人工重置
+
+[forbidden]
+leverage = false
+derivatives = false
+borrowing = false
+withdrawals = false
+transfers = false
+unlimited_approvals = false       # CEX 无 allowance，保留字段以保持策略形状一致
+
+[whitelist]
+# P0 审计过的现货交易对。新增交易对必须先在 docs/04 留下 filters 证据。
+symbols = [
+  "BTCUSDT",
+  "BNBUSDT",
+  "CAKEUSDT",
+]
+# 已拉取 filters 但未完成 P0 审计的对：出现在意图里按"未白名单"拒绝
+observer_symbols = [
+  "ETHUSDT",
+  "SOLUSDT",
+]
+quote_assets = ["USDT"]
+
+[execution]
+enabled = false                   # 第一道开关：默认关闭
+dry_run = true                    # 默认只产出意图，不落单
+# 第二道开关：显式解锁环境变量（Binance 侧没有对应校验，所以必须本地强制）
+require_env_unlock = "TRADER_LIVE_ORDERS"
+# 第三道开关：即使是 live 模式，也只允许打到测试网，除非再显式打开这一项
+allow_mainnet = false

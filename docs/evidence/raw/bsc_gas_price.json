@@ -1,0 +1,21 @@
+{
+  "chain": "bsc",
+  "last_block": 1,
+  "high": "300000000",
+  "average": "120000000",
+  "low": "100000000",
+  "suggest_base_fee": "120000000",
+  "high_prio_fee": "0",
+  "average_prio_fee": "0",
+  "low_prio_fee": "0",
+  "high_prio_fee_mixed": "0",
+  "average_prio_fee_mixed": "0",
+  "low_prio_fee_mixed": "0",
+  "native_token_usd_price": 695.005,
+  "high_estimate_time": 3,
+  "average_estimate_time": 3,
+  "low_estimate_time": 10,
+  "high_orign": "300000000",
+  "average_orign": "120000000",
+  "low_orign": "100000000"
+}

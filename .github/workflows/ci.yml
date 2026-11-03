@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # 零第三方依赖：config 用 stdlib tomllib，测试用 stdlib unittest
+      - name: risk gate acceptance tests
+        run: python -m unittest discover -s tests -v
+
+      - name: policy must keep execution disabled
+        run: python tools/ci_assert_policy.py
+
+      - name: relative doc links resolve
+        run: python tools/check_links.py

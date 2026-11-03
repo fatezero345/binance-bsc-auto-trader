@@ -1,0 +1,89 @@
+#!/usr/bin/env python3
+"""CI 断言：P0 的安全姿态没被悄悄改回去。
+
+这一段存在的理由很具体——风控代码写对了，但如果有人把
+``[execution] enabled`` 改成 true 并提交，所有单测仍然是绿的，
+而系统就真能下单了。所以这道门只检查"开关状态"与"硬上限量级"，
+以及 ADR-0002 落地后必须持续成立的四件事：
+
+  * 场所仍是 binance_spot，且 gmgn_bsc 仍在 archived 里；
+  * 提币权仍然被要求关闭；
+  * 主网仍然不被允许（allow_mainnet = false）；
+  * 交易所下限 5 USDT 与本项目上限 10 USDT 之间仍然存在可行窗口。
+"""
+
+from __future__ import annotations
+
+import sys
+from decimal import Decimal
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from src.risk import execution_gate, load_policy  # noqa: E402
+
+# P0 任务书 §5 的四个数字。改了这里就等于改了实验边界，必须是有意的。
+P0_LIMITS = {
+    "max_notional": Decimal("10.00"),
+    "max_risk_budget": Decimal("0.30"),
+    "max_cumulative_loss": Decimal("1.50"),
+}
+
+
+def main() -> int:
+    policy = load_policy()
+    failures: list[str] = []
+
+    # --- 执行必须关 ---
+    gate = execution_gate(policy, environ={})
+    if gate.may_submit:
+        failures.append("execution gate is OPEN with an empty environment")
+    if policy.execution.get("enabled"):
+        failures.append("[execution].enabled is true -- P0 must ship disabled")
+    if not policy.execution.get("dry_run"):
+        failures.append("[execution].dry_run is false -- P0 must ship dry-run")
+    if policy.execution.get("allow_mainnet"):
+        failures.append("[execution].allow_mainnet is true -- P0 must target testnet only")
+
+    # --- 资金上限仍在 P0 预算内 ---
+    for name, ceiling in P0_LIMITS.items():
+        actual = getattr(policy, name)
+        if actual > ceiling:
+            failures.append(f"{name}={actual} exceeds the P0 ceiling {ceiling}")
+    if policy.max_open_positions > 1:
+        failures.append(f"max_open_positions={policy.max_open_positions} > 1")
+
+    # --- 场所（ADR-0002）---
+    if policy.venue_primary != "binance_spot":
+        failures.append(f"venue.primary={policy.venue_primary!r} != 'binance_spot'")
+    if "gmgn_bsc" not in policy.archived_venues:
+        failures.append("venue.archived no longer lists gmgn_bsc -- ADR-0002 regression")
+
+    # --- CEX 模型的安全前提 ---
+    perms = policy.binance_perms
+    if not perms.get("require_can_withdraw_false", False):
+        failures.append("require_can_withdraw_false must stay true -- this is the whole point")
+
+    # --- 可行窗口：交易所下限 <= 本项目上限 ---
+    if policy.min_notional > policy.max_notional:
+        failures.append(
+            f"no feasible order window: exchange min {policy.min_notional} > "
+            f"policy cap {policy.max_notional}"
+        )
+
+    if failures:
+        print("FAIL:")
+        for f in failures:
+            print(f"  - {f}")
+        return 1
+
+    print("ok: venue=binance_spot, execution closed, mainnet refused, limits within P0 budget")
+    print(
+        f"     order window = [{policy.min_notional}, {policy.max_notional}] USDT "
+        f"out of {policy.raw['capital']['initial_equity_usdt']} USDT equity"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

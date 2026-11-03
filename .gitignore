@@ -1,0 +1,26 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+build/
+dist/
+
+# --- never commit secrets -------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+mnemonic*
+keystore/
+secrets/
+
+# --- runtime state --------------------------------------------------------
+runs/
+state/
+ledger/*.jsonl
+!ledger/.gitkeep
+docs/evidence/raw/*.local.*
