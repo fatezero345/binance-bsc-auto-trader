@@ -24,8 +24,10 @@ from src.risk import execution_gate, load_policy  # noqa: E402
 
 # P0 任务书 §5 的四个数字。改了这里就等于改了实验边界，必须是有意的。
 P0_LIMITS = {
-    "max_notional": Decimal("5.00"),
-    "max_risk_budget": Decimal("0.30"),
+    # 2026-11-03 所有者授权把本金全部投入（3 仓 x 8 USDT）。
+    # 原来的固定数上限改为**关系断言**：数字可以调，但下面这些关系不能破。
+    "hard_notional": Decimal("12.00"),      # 单笔绝对天花板（防手滑）
+    "hard_positions": 5,                    # 同时持仓数绝对上限
     "max_cumulative_loss": Decimal("1.50"),
 }
 
@@ -43,12 +45,30 @@ def main() -> int:
         failures.append("dry_run is on but there is no env unlock requirement")
 
     # --- 资金上限仍在 P0 预算内 ---
-    for name, ceiling in P0_LIMITS.items():
-        actual = getattr(policy, name)
-        if actual > ceiling:
-            failures.append(f"{name}={actual} exceeds the P0 ceiling {ceiling}")
-    if policy.max_open_positions > 1:
-        failures.append(f"max_open_positions={policy.max_open_positions} > 1")
+    hard_n = P0_LIMITS["hard_notional"]
+    hard_p = P0_LIMITS["hard_positions"]
+    if policy.notional_ceiling > hard_n:
+        failures.append(
+            f"per-order notional {policy.notional_ceiling} exceeds hard cap {hard_n}"
+        )
+    if policy.max_open_positions > hard_p:
+        failures.append(
+            f"max_open_positions={policy.max_open_positions} > hard cap {hard_p}"
+        )
+    # 关系 1：每仓风险必须 >= 名义 x 止损距离，否则每一单都会被自己的风控拒掉
+    needed_risk = policy.notional_ceiling * Decimal("0.05")
+    if policy.max_risk_budget < needed_risk:
+        failures.append(
+            f"max_risk_budget={policy.max_risk_budget} < ceiling*5%={needed_risk:.4f} "
+            "-- every order would be self-rejected"
+        )
+    # 关系 2：全部仓位同时止损，不得超过组合熔断
+    worst_case = policy.max_risk_budget * policy.max_open_positions
+    if worst_case > policy.max_cumulative_loss:
+        failures.append(
+            f"worst case {worst_case} (risk x positions) exceeds cumulative cap "
+            f"{policy.max_cumulative_loss}"
+        )
 
     # --- 场所（ADR-0002）---
     if policy.venue_primary != "binance_spot":

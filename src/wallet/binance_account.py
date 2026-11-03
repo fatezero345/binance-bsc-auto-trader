@@ -104,7 +104,16 @@ def server_offset_ms(refresh: bool = False) -> int:
 
 
 def now_ms() -> int:
-    return int(time.time() * 1000) + server_offset_ms()
+    """签名用的时间戳。**不做偏移补偿。**
+
+    2026-11-03 实测教训：在 RTT 6.6s 的样本上估出的偏移量是 +3713ms，
+    补偿之后交易所返回
+        -1021 "Timestamp for this request was 1000ms ahead of the server's time"
+    —— Binance 对"未来时间戳"的容忍只有 1000ms，而低质量样本估出的偏移
+    很容易超过去。偏移不准比不补偿更糟。
+    正确做法：时间戳保持本地原值，把 recvWindow 放大（60000ms）来吸收偏差。
+    """
+    return int(time.time() * 1000)
 
 
 def _sign(secret: str, query: str) -> str:

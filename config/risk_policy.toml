@@ -72,13 +72,13 @@ enable_portfolio_margin  = "ADR-0003 / 同上"
 
 [order_limits]
 # 单笔目标金额。2026-11-03 由所有者从 10.00 下调为 5.00。
-max_notional_per_order_usdt = 5.00
+max_notional_per_order_usdt = 7.92      # 6.0 -> 7.92：ceiling 8.00，3 标的 x 8 = 24 USDT0
 # ★ 量化上浮容许度。步长是离散的，取整后的名义本金不可能恰好等于目标值：
 #   例 CAKEUSDT step=0.01、price=1.845 → 最小合法单 2.72 CAKE = 5.0184 USDT。
 #   因此 cap 的语义是「目标 5.00，硬上限 = 5.00 × (1 + 100bps) = 5.05」。
 #   超过硬上限一律拒绝，不做四舍五入、不自动缩量。
 max_quantization_overrun_bps = 100      # 1.00%
-max_risk_budget_per_order_usdt = 0.30
+max_risk_budget_per_order_usdt = 0.40   # 8.00 x 5% 止损 = 0.40；3 仓合计 1.20 < 1.50 熔断0
 max_slippage_bps = 300            # 3.00%
 # CEX 没有 gas，但有手续费。按 0.1% taker 计，5 USDT 单边 0.005 USDT
 max_fee_bps = 20                  # 0.20% 上限；实际费率以 /api/v3/account 为准
@@ -88,8 +88,8 @@ min_notional_usdt = 5.00
 quantization_failure = "reject"
 
 [portfolio]
-max_open_positions = 1
-max_position_notional_usdt = 5.05  # = 硬上限，与 order_limits 保持一致
+max_open_positions = 3
+max_position_notional_usdt = 8.05  # = 硬上限，与 order_limits 保持一致
 
 [circuit_breaker]
 max_cumulative_realized_loss_usdt = 1.50
