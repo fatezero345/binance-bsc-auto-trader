@@ -44,6 +44,7 @@ from src.risk import (  # noqa: E402
     execution_gate,
     load_policy,
     plan_buy_quantity,
+    quantize_down,
 )
 from src.strategy.exit_rules import Position, exit_decision  # noqa: E402
 from src.strategy.momentum_gate import closes_from_klines, entry_gate  # noqa: E402
@@ -158,15 +159,34 @@ def do_buy(policy: Policy, key: str, secret: str, live: bool) -> None:
 
 
 def do_exit(policy: Policy, key: str, secret: str, live: bool, pos: Position, why: str) -> None:
+    """平仓。
+
+    2026-11-03 实盘教训（18 次 -2010）：
+      1. 不能按 ``pos.qty`` 卖 —— 手续费是从**基础币**里扣的，实际余额 2.71728
+         而不是 2.72。多卖 0.00272 会被交易所判成余额不足。
+      2. 所以必须读**真实可用余额**，再按 stepSize 向下量化。
+    """
     snap = bp.snapshot(SYMBOL)
+    acct = wa.get_account(key, secret)
+    base = snap.filters.base_asset
+    free_base = Decimal(wa.balances(acct, assets=(base,)).get(base, "0"))
+    qty = quantize_down(free_base, snap.filters.step_size)
+
+    if qty <= 0:
+        # 已经没货了（上一次卖出其实成功了，或人工平掉了）—— 清状态，别卡死
+        save_state({"position": None, "closed_ts": int(time.time()),
+                    "last_exit": "already_flat"})
+        log("flat_no_balance", symbol=SYMBOL, why=why)
+        return
+
     intent = OrderIntent(venue=Venue.BINANCE_SPOT, symbol=SYMBOL, side=Side.SELL,
                          instrument=Instrument.SPOT,
-                         quote_notional_usdt=(Decimal(pos.qty) * snap.price).quantize(Decimal("0.0001")),
-                         base_qty=Decimal(pos.qty), reference_price=snap.price,
+                         quote_notional_usdt=(qty * snap.price).quantize(Decimal("0.0001")),
+                         base_qty=qty, reference_price=snap.price,
                          stop_distance_bps=0, slippage_bps=50, fee_bps=10,
                          filters=snap.filters)
     if not live:
-        log("would_sell", symbol=SYMBOL, qty=pos.qty, why=why, price=str(snap.price))
+        log("would_sell", symbol=SYMBOL, qty=str(qty), why=why, price=str(snap.price))
         return
 
     raw = policy.raw
@@ -174,31 +194,62 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, pos: Position, wh
     live_policy = Policy(raw)
     gate = execution_gate(live_policy, environ={"TRADER_LIVE_ORDERS": "1"})
     perms = wa.full_permissions(key, secret)
-    acct = wa.get_account(key, secret)
-    free = Decimal(wa.balances(acct).get("USDT", "0"))
-    st = PortfolioState(equity_usdt=free, realized_loss_usdt=Decimal("0"),
-                        open_positions=1, quote_free_usdt=free)
+    free_usdt = Decimal(wa.balances(acct).get("USDT", "0"))
+    st = PortfolioState(equity_usdt=free_usdt, realized_loss_usdt=Decimal("0"),
+                        open_positions=1, quote_free_usdt=free_usdt)
     d = assess(intent, st, perms, live_policy)
-    # 卖出方向不受持仓数约束，但仍走同一条风控（符号白名单/过滤器/上限）
     if not d.approved:
-        log("sell_blocked", violations=list(d.violations))
+        log("sell_blocked", violations=list(d.violations), qty=str(qty), price=str(snap.price))
         return
     try:
         res = submit_order(intent, d, gate, live_policy, perms, key, secret)
     except ExecutionRefused as exc:
-        log("order_failed", side="SELL", error=str(exc)[:400])
+        log("order_failed", side="SELL", error=str(exc)[:400], qty=str(qty))
         return
-    pnl = (snap.price - pos.entry_price) * float(pos.qty)
+    pnl = (snap.price - pos.entry_price) * float(qty)
     save_state({"position": None, "closed_ts": int(time.time()),
                 "last_exit": why, "last_pnl_usdt": round(pnl, 6)})
-    log("sold", symbol=SYMBOL, qty=pos.qty, exit=float(snap.price), why=why,
+    log("sold", symbol=SYMBOL, qty=str(qty), exit=float(snap.price), why=why,
         pnl_usdt=round(pnl, 6), response=res)
+
+
+def reconcile(key: str, secret: str, st: dict) -> dict:
+    """把状态文件与账户真实余额对齐。
+
+    2026-11-03 的第四个 bug：一笔卖单**已经在交易所成交**，但 HTTP 响应在 TLS 层丢了，
+    本地什么都没记。下一 tick 靠"余额为 0"猜出已经平仓 —— 猜对了是运气。
+    「状态未知」是这类系统最危险的失败模式：钱动了没有，不知道。
+
+    这一步不能修复"响应丢失"，但能保证**每个 tick 开始时，状态不会长期偏离账户**。
+    真正的修复需要按 clientOrderId 查 /api/v3/order 做幂等确认（留给 P3）。
+    """
+    try:
+        snap = bp.snapshot(SYMBOL)
+        acct = wa.get_account(key, secret)
+        base = snap.filters.base_asset
+        free = Decimal(wa.balances(acct, assets=(base,)).get(base, "0"))
+    except Exception as exc:                                   # noqa: BLE001
+        log("reconcile_error", error=str(exc)[:200])
+        return st
+
+    has_pos = bool(st.get("position"))
+    dust = snap.filters.step_size                              # 小于一步长 = 灰尘
+    if has_pos and free < dust:
+        log("reconcile", note="state had a position but the account is flat -> mark flat")
+        st = {"position": None, "closed_ts": int(time.time()), "last_exit": "reconciled_flat"}
+        save_state(st)
+    elif (not has_pos) and free >= snap.filters.min_qty:
+        log("reconcile", note="untracked balance: the account holds more than the state knows",
+            free=str(free))
+        st["untracked_balance"] = str(free)
+        save_state(st)
+    return st
 
 
 def tick() -> int:
     key, secret, live = load_creds()
     policy = load_policy()
-    st = load_state()
+    st = reconcile(key, secret, load_state())
     raw_pos = st.get("position")
 
     if raw_pos:

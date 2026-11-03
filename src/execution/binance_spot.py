@@ -107,10 +107,13 @@ def build_order_params(
     if qty != intent.base_qty:
         reasons.append(f"qty_not_on_step:{intent.base_qty}->{qty}")
     notional = qty * intent.reference_price
-    if notional < intent.filters.min_notional:
-        reasons.append(f"below_exchange_min_notional:{notional}<{intent.filters.min_notional}")
-    if notional > policy.notional_ceiling:
-        reasons.append(f"notional_exceeds_ceiling:{notional}>{policy.notional_ceiling}")
+    # 金额区间只约束开仓，**卖出必须放行** —— 否则会出现"能买不能卖"，
+    # 2026-11-03 实盘就是这么被卡了 3 小时的（18 次重试全失败）。
+    if intent.side is Side.BUY:
+        if notional < intent.filters.min_notional:
+            reasons.append(f"below_exchange_min_notional:{notional}<{intent.filters.min_notional}")
+        if notional > policy.notional_ceiling:
+            reasons.append(f"notional_exceeds_ceiling:{notional}>{policy.notional_ceiling}")
 
     base_url, more = _base_url(policy, gate)
     reasons.extend(more)

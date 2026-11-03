@@ -296,16 +296,21 @@ def assess(
     if intent.base_qty < f.min_qty:
         v.append(f"base_qty_below_min:{intent.base_qty}<{f.min_qty}")
 
-    # 6) 金额区间（交易所下限 与 本项目上限 双向夹逼）
+    # 6) 金额区间 —— **只约束开仓方向（BUY）**。
+    #    2026-11-03 实盘暴露：把 minNotional / ceiling 也套在 SELL 上，
+    #    导致"能买不能卖"——持仓 3 小时无法退出，18 次重试全部失败。
+    #    退出的优先级高于任何资金上限：不让人离场的风控不是风控，是牢笼。
     notional = intent.quote_notional_usdt
+    is_buy = intent.side.value == "buy"
     if notional <= 0:
         v.append("notional_non_positive")
-    if notional < f.min_notional:
-        v.append(f"below_exchange_min_notional:{notional}<{f.min_notional}")
-    if notional < policy.min_notional:
-        v.append(f"below_policy_min_notional:{notional}<{policy.min_notional}")
-    if notional > policy.notional_ceiling:
-        v.append(f"notional_exceeds_ceiling:{notional}>{policy.notional_ceiling}")
+    if is_buy:
+        if notional < f.min_notional:
+            v.append(f"below_exchange_min_notional:{notional}<{f.min_notional}")
+        if notional < policy.min_notional:
+            v.append(f"below_policy_min_notional:{notional}<{policy.min_notional}")
+        if notional > policy.notional_ceiling:
+            v.append(f"notional_exceeds_ceiling:{notional}>{policy.notional_ceiling}")
 
     # 7) 意图自洽：base_qty × reference_price 应约等于 notional
     if intent.reference_price <= 0:
@@ -317,12 +322,12 @@ def assess(
             if drift > NOTIONAL_TOLERANCE:
                 v.append(f"notional_inconsistent:{implied:.8f} vs {notional}")
 
-    # 8) 风险预算
+    # 8) 风险预算 —— 只对开仓有意义；卖出是了结风险，不受预算限制
     risk = computed_risk_usdt(intent)
-    if risk > policy.max_risk_budget:
+    if is_buy and risk > policy.max_risk_budget:
         v.append(f"risk_budget_exceeded:{risk}>{policy.max_risk_budget}")
 
-    # 9) 滑点与手续费
+    # 9) 滑点与手续费（两个方向都管）
     if intent.slippage_bps < 0:
         v.append("slippage_negative")
     if intent.slippage_bps > policy.max_slippage_bps:
@@ -333,20 +338,21 @@ def assess(
         v.append(f"fee_exceeds_cap:{intent.fee_bps}>{policy.max_fee_bps}")
 
     # 10) 持仓数量（只约束开新仓方向）
-    if intent.side.value == "buy":
+    if is_buy:
         if state.open_positions >= policy.max_open_positions:
             v.append(
                 f"max_open_positions_reached:{state.open_positions}>={policy.max_open_positions}"
             )
 
-    # 11) 熔断
-    if state.realized_loss_usdt >= policy.max_cumulative_loss:
+    # 11) 熔断 —— 只拦新的开仓。**卖出永远放行**：
+    #     熔断的目的是停止冒险，不是把人锁在仓位里（2026-11-03 实盘教训）。
+    if is_buy and state.realized_loss_usdt >= policy.max_cumulative_loss:
         v.append(
             f"circuit_breaker_tripped:{state.realized_loss_usdt}>={policy.max_cumulative_loss}"
         )
 
-    # 12) 风险不得超过本金
-    if risk > state.equity_usdt:
+    # 12) 风险不得超过本金（开仓侧）
+    if is_buy and risk > state.equity_usdt:
         v.append("risk_exceeds_equity")
 
     # 13) 可用余额：买不起就是买不起。

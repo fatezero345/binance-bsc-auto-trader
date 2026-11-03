@@ -103,20 +103,35 @@ def _signed(method: str, path: str, params: dict[str, Any], *, api_key: str, api
     signature = _sign(api_secret, query)
     url = f"{base.rstrip('/')}{path}?{query}&signature={signature}"
 
-    req = urllib.request.Request(
-        url,
-        data=b"" if method == "POST" else None,
-        headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT},
-        method=method,
-    )
-    try:
+    def _once():
+        req = urllib.request.Request(
+            url,
+            data=b"" if method == "POST" else None,
+            headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT},
+            method=method,
+        )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:300]
-        raise WalletError(f"{path} -> HTTP {exc.code}: {body}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise WalletError(f"{path} -> unreachable: {exc}") from exc
+
+    # -1021 = 时间戳落在 recvWindow 外。2026-11-03 实测偏差只有 ~0.75s（窗口 5s），
+    # 真正的原因是 Windows 时间服务校时瞬间把本地时钟**跳**了一下：
+    # 请求签名时用旧时间、服务端校验时时钟已变。稳定偏移不会触发，跳变才会。
+    # 只对 **GET（只读）** 重试一次；POST（下单）绝不自动重试 —— 那可能重复成交。
+    attempts = 2 if method == "GET" else 1
+    last = None
+    for i in range(attempts):
+        try:
+            return _once()
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:300]
+            last = WalletError(f"{path} -> HTTP {exc.code}: {body}")
+            if exc.code == 400 and '"code":-1021' in body and i + 1 < attempts:
+                time.sleep(1.0)
+                continue
+            raise last from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            raise WalletError(f"{path} -> unreachable: {exc}") from exc
+    raise last if last else WalletError(f"{path} -> failed")
 
 
 def get_account(api_key: str, api_secret: str, *, base: str = DEFAULT_BASE) -> dict:

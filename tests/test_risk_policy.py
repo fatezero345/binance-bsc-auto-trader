@@ -392,6 +392,46 @@ class TestRiskGate(unittest.TestCase):
         self.assertTrue(d2.approved, d2.violations)
         self.assertEqual(d2.computed_risk_usdt, D("0.2996"))
 
+    def test_sell_is_exempt_from_entry_side_limits(self):
+        """2026-11-03 实盘：把 minNotional / ceiling / 熔断套在 SELL 上，
+        导致持仓 3 小时无法退出（18 次重试全失败）。**退出优先于任何资金上限。**
+
+        下面每一条都单独构造出"按买入标准会被拒"的卖出单，断言它仍然放行。
+        """
+        # a) 名义本金低于交易所下限（卖出落到底部时会发生）
+        low = intent(qty="2.68", notional="4.94192", side=Side.SELL,
+                     stop_distance_bps=0)
+        d = assess(low, state(), GOOD_PERMS, self.p)
+        self.assertTrue(d.approved, d.violations)
+
+        # b) 名义本金高于单笔上限（价格上涨后卖出时会发生）
+        high = intent(qty="2.74", notional="5.05256", side=Side.SELL,
+                      stop_distance_bps=0)
+        d = assess(high, state(), GOOD_PERMS, self.p)
+        self.assertTrue(d.approved, d.violations)
+
+        # c) 熔断已触发 + 已满仓：仍然必须放行卖出
+        d = assess(intent(qty="2.72", notional="5.0184", side=Side.SELL,
+                          stop_distance_bps=0),
+                   state(realized_loss_usdt=D("1.50"), open_positions=1),
+                   GOOD_PERMS, self.p)
+        self.assertTrue(d.approved, d.violations)
+
+    def test_sell_still_obeys_structural_checks(self):
+        """放行退出 ≠ 无脑放行。结构性检查对卖出同样有效。"""
+        # 非白名单标的
+        bad = intent(side=Side.SELL, stop_distance_bps=0)
+        object.__setattr__(bad, "symbol", "DOGEUSDT")
+        self.assertFalse(assess(bad, state(), GOOD_PERMS, self.p).approved)
+        # 步长不对
+        off = intent(qty="2.725", notional="5.0249", side=Side.SELL, stop_distance_bps=0)
+        self.assertFalse(assess(off, state(), GOOD_PERMS, self.p).approved)
+        # 提币权红线
+        unsafe = AccountPermissions(True, False, False, ("SPOT",), self._key(enable_withdrawals=True))
+        self.assertFalse(
+            assess(intent(side=Side.SELL, stop_distance_bps=0), state(), unsafe, self.p).approved
+        )
+
     def test_circuit_breaker_blocks_everything(self):
         d = assess(intent(), state(realized_loss_usdt=D("1.50")), GOOD_PERMS, self.p)
         self.assertFalse(d.approved)
