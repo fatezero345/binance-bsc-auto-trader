@@ -43,6 +43,16 @@ READ_ONLY_PATHS: frozenset[str] = frozenset(
 ENV_API_KEY = "BINANCE_API_KEY"
 ENV_API_SECRET = "BINANCE_API_SECRET"
 
+# 语义只读、但 Binance 要求用 POST 的查询接口。
+# 单独一张表 + 独立的 read_post()，是为了让"POST"这件事不能随便扩散：
+# 想加一条必须改这个集合，而 transfer / withdraw / order 都不在这里。
+READ_ONLY_POST_PATHS: frozenset[str] = frozenset(
+    {
+        "/sapi/v1/asset/get-funding-asset",   # 资金钱包余额
+        "/sapi/v3/asset/getUserAsset",        # 全部钱包余额（含 valuation）
+    }
+)
+
 
 class CredentialsMissing(RuntimeError):
     """环境里没有 API 凭据。P0 阶段这是**预期状态**，不是故障。"""
@@ -71,7 +81,21 @@ def read(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
          base: str = DEFAULT_BASE, recv_window: int = 5000, timeout: int = 15) -> Any:
     if path not in READ_ONLY_PATHS:
         raise WalletError(f"path not in READ_ONLY_PATHS: {path}")
+    return _signed("GET", path, params, api_key=api_key, api_secret=api_secret,
+                   base=base, recv_window=recv_window, timeout=timeout)
 
+
+def read_post(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
+              base: str = DEFAULT_BASE, recv_window: int = 5000, timeout: int = 15) -> Any:
+    """语义只读、但交易所要求 POST 的查询。白名单独立，见 READ_ONLY_POST_PATHS。"""
+    if path not in READ_ONLY_POST_PATHS:
+        raise WalletError(f"path not in READ_ONLY_POST_PATHS: {path}")
+    return _signed("POST", path, params, api_key=api_key, api_secret=api_secret,
+                   base=base, recv_window=recv_window, timeout=timeout)
+
+
+def _signed(method: str, path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
+            base: str, recv_window: int, timeout: int) -> Any:
     q = dict(params)
     q["timestamp"] = int(time.time() * 1000)
     q["recvWindow"] = recv_window
@@ -80,7 +104,10 @@ def read(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
     url = f"{base.rstrip('/')}{path}?{query}&signature={signature}"
 
     req = urllib.request.Request(
-        url, headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT}, method="GET"
+        url,
+        data=b"" if method == "POST" else None,
+        headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT},
+        method=method,
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
