@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -28,20 +29,37 @@ class MarketError(RuntimeError):
 
 
 def _request(
-    path: str, params: dict[str, Any] | None = None, *, base: str = DEFAULT_BASE, timeout: int = 15
+    path: str, params: dict[str, Any] | None = None, *, base: str = DEFAULT_BASE,
+    timeout: int = 15, attempts: int = 3,
 ) -> Any:
+    """公开行情请求，**带重试**。
+
+    2026-11-03 实测：到 api.binance.com 的 TLS 握手会偶发
+    `SSL: UNEXPECTED_EOF_WHILE_READING`，RTT 中位数 2.3s、峰值 6.6s。
+    没有重试的话，一次握手失败就会让整个 tick 崩掉 —— 实际发生过。
+    只读请求重试是安全的（幂等）；下单绝不在此层。
+    """
     url = base.rstrip("/") + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", "replace")[:300]
-        raise MarketError(f"{path} -> HTTP {exc.code}: {body}") from exc
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise MarketError(f"{path} -> unreachable: {exc}") from exc
+
+    last: Exception | None = None
+    for i in range(attempts):
+        req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT}, method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            body = exc.read().decode("utf-8", "replace")[:300]
+            last = MarketError(f"{path} -> HTTP {exc.code}: {body}")
+            # 4xx 是确定性错误，重试无意义；5xx / 429 才重试
+            if exc.code < 500 and exc.code != 429:
+                raise last from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = MarketError(f"{path} -> unreachable: {exc}")
+        if i + 1 < attempts:
+            time.sleep(0.8 * (i + 1))
+    raise last if last else MarketError(f"{path} -> failed")
 
 
 def server_time(*, base: str = DEFAULT_BASE) -> int:

@@ -73,12 +73,46 @@ def load_credentials(environ: Mapping[str, str]) -> tuple[str, str]:
     return key, secret
 
 
+
+# ---------------------------------------------------------------- 时钟补偿
+# 2026-11-03 实测：到 api.binance.com 的 RTT 中位数 2.3s（最长 6.6s），
+# 本机时钟比服务器慢 1.4–2.7s。两者叠加会超过 recvWindow，导致 -1021。
+# 光调大 recvWindow 不够（RTT 抖动会持续吃余量），还要把偏差本身补掉。
+_OFFSET_MS: int | None = None
+_OFFSET_AT: float = 0.0
+_OFFSET_TTL_S = 600.0
+
+
+def server_offset_ms(refresh: bool = False) -> int:
+    """server - local（毫秒），用往返中点估算，带 10 分钟缓存。"""
+    global _OFFSET_MS, _OFFSET_AT
+    now = time.time()
+    if refresh or _OFFSET_MS is None or (now - _OFFSET_AT) > _OFFSET_TTL_S:
+        try:
+            from src.market.binance_public import server_time
+
+            t0 = time.time()
+            st = server_time()
+            t1 = time.time()
+            mid = t0 + (t1 - t0) / 2.0
+            _OFFSET_MS = int(st - mid * 1000)
+            _OFFSET_AT = t1
+        except Exception:                                     # noqa: BLE001
+            _OFFSET_MS = 0
+            _OFFSET_AT = now
+    return _OFFSET_MS
+
+
+def now_ms() -> int:
+    return int(time.time() * 1000) + server_offset_ms()
+
+
 def _sign(secret: str, query: str) -> str:
     return hmac.new(secret.encode(), query.encode(), hashlib.sha256).hexdigest()
 
 
 def read(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
-         base: str = DEFAULT_BASE, recv_window: int = 5000, timeout: int = 15) -> Any:
+         base: str = DEFAULT_BASE, recv_window: int = 20000, timeout: int = 15) -> Any:
     if path not in READ_ONLY_PATHS:
         raise WalletError(f"path not in READ_ONLY_PATHS: {path}")
     return _signed("GET", path, params, api_key=api_key, api_secret=api_secret,
@@ -86,7 +120,7 @@ def read(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
 
 
 def read_post(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
-              base: str = DEFAULT_BASE, recv_window: int = 5000, timeout: int = 15) -> Any:
+              base: str = DEFAULT_BASE, recv_window: int = 20000, timeout: int = 15) -> Any:
     """语义只读、但交易所要求 POST 的查询。白名单独立，见 READ_ONLY_POST_PATHS。"""
     if path not in READ_ONLY_POST_PATHS:
         raise WalletError(f"path not in READ_ONLY_POST_PATHS: {path}")
@@ -97,7 +131,7 @@ def read_post(path: str, params: dict[str, Any], *, api_key: str, api_secret: st
 def _signed(method: str, path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
             base: str, recv_window: int, timeout: int) -> Any:
     q = dict(params)
-    q["timestamp"] = int(time.time() * 1000)
+    q["timestamp"] = now_ms()
     q["recvWindow"] = recv_window
     query = urllib.parse.urlencode(q, doseq=True)
     signature = _sign(api_secret, query)
@@ -117,7 +151,8 @@ def _signed(method: str, path: str, params: dict[str, Any], *, api_key: str, api
     # 真正的原因是 Windows 时间服务校时瞬间把本地时钟**跳**了一下：
     # 请求签名时用旧时间、服务端校验时时钟已变。稳定偏移不会触发，跳变才会。
     # 只对 **GET（只读）** 重试一次；POST（下单）绝不自动重试 —— 那可能重复成交。
-    attempts = 2 if method == "GET" else 1
+    # GET 只读幂等 -> 网络抖动可重试；POST 绝不（可能重复成交）
+    attempts = 3 if method == "GET" else 1
     last = None
     for i in range(attempts):
         try:
@@ -129,8 +164,12 @@ def _signed(method: str, path: str, params: dict[str, Any], *, api_key: str, api
                 time.sleep(1.0)
                 continue
             raise last from exc
-        except (urllib.error.URLError, TimeoutError) as exc:
-            raise WalletError(f"{path} -> unreachable: {exc}") from exc
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = WalletError(f"{path} -> unreachable: {exc}")
+            if i + 1 < attempts:
+                time.sleep(1.0 * (i + 1))   # 链路 RTT 中位数 2.3s，退避要够
+                continue
+            raise last from exc
     raise last if last else WalletError(f"{path} -> failed")
 
 
@@ -172,7 +211,7 @@ def query_order(api_key: str, api_secret: str, *, symbol: str,
     else:
         params["orderId"] = order_id
     return _signed("GET", "/api/v3/order", params, api_key=api_key, api_secret=api_secret,
-                   base=base, recv_window=5000, timeout=15)
+                   base=base, recv_window=20000, timeout=15)
 
 def balances(account: dict, assets: tuple[str, ...] = ("USDT", "BNB")) -> dict[str, str]:
     """只返回关心的资产，避免把整个账户余额表写进日志。"""

@@ -157,7 +157,8 @@ def build_order_params(
 def _signed_post(path: str, params: dict[str, Any], *, api_key: str, api_secret: str,
                  base_url: str, recv_window: int, timeout: int) -> dict:
     q = dict(params)
-    q["timestamp"] = int(time.time() * 1000)
+    from src.wallet.binance_account import now_ms
+    q["timestamp"] = now_ms()
     q["recvWindow"] = recv_window
     query = urllib.parse.urlencode(q)
     signature = hmac.new(api_secret.encode(), query.encode(), hashlib.sha256).hexdigest()
@@ -169,13 +170,24 @@ def _signed_post(path: str, params: dict[str, Any], *, api_key: str, api_secret:
         headers={"X-MBX-APIKEY": api_key, "User-Agent": USER_AGENT},
         method="POST",
     )
+    cid = str(q.get("newClientOrderId", ""))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             body = resp.read().decode("utf-8")
             return json.loads(body) if body.strip() else {"ok": True}
     except urllib.error.HTTPError as exc:
+        # 交易所明确回了错误码 —— 订单没有成交，结论**已知**
         body = exc.read().decode("utf-8", "replace")[:400]
         raise ExecutionRefused(f"{path} rejected HTTP {exc.code}: {body}") from exc
+    except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as exc:
+        # 没拿到响应 —— 订单**可能已经成交**。绝不能当成失败直接重试。
+        raise OrderStateUnknown(
+            f"{path} state unknown: {exc}", cid, str(q.get("symbol", ""))
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise OrderStateUnknown(
+            f"{path} state unknown (unparsable body)", cid, str(q.get("symbol", ""))
+        ) from exc
 
 
 def preflight_order(

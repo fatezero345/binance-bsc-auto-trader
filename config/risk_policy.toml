@@ -18,7 +18,7 @@ primary = "binance_spot"
 base_url = "https://api.binance.com"
 # 演练优先用测试网；测试网账户与主网资产完全隔离
 testnet_base_url = "https://testnet.binance.vision"
-recv_window_ms = 5000
+recv_window_ms = 60000     # 2026-11-03 实测 RTT 1-6.6s + 时钟偏差 -1.4~-2.7s，5s 不够
 # 本机时钟与服务器偏差上限。2026-11-03 实测 -163 ms，留 6 倍余量
 max_clock_skew_ms = 1000
 # 已归档的旧场所：代码保留，但不得被启用（CI 断言）
