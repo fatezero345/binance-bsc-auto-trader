@@ -31,7 +31,7 @@ Binance 的 API Key 有独立权限位，**提币权可以物理关闭**：
 | | Key 泄漏后的最坏后果 |
 | --- | --- |
 | 提币权开着 | 资金被转走，全失，本地无法拦 |
-| **提币权关着** | 只能在本账户内乱交易；损失上界 = 单笔 10 USDT + 熔断 1.50 USDT |
+| **提币权关着** | 只能在本账户内乱交易；损失上界 = 单笔硬上限 5.05 USDT + 熔断 1.50 USDT |
 
 所以 `assess()` 与 `build_order_params()` 各有一条硬断言 `can_withdraw == False`，`tools/account_probe.py` 在检测到提币权开着时**退出码 3 要求停手**，`ci_assert_policy.py` 另外断言策略不允许放弃这条检查。
 
@@ -52,18 +52,18 @@ Binance 的 API Key 有独立权限位，**提币权可以物理关闭**：
 
 钱包地址、Chain ID、USDT/BNB 余额全部如实标 BLOCKED。Chain ID 一项在 CEX 模式下**失去意义**（不是"没测"），报告里保留了原编号以便对上任务书。
 
-### 4. 29.30 USDT 能下单，但只能动用约三分之一
+### 4. 单笔压到 5.00 之后：只剩 CAKEUSDT 能下单
 
-三条约束同时成立才叫"能下单"：交易所 `minNotional=5`、本项目 `max_notional=10`、stepSize 量化后必须落在两者之间。
+四条约束同时成立才叫"能下单"：交易所 `minNotional=5.00`、本项目目标 `max_notional=5.00`、量化上浮容许度 100 bps（硬上限 5.05）、stepSize 量化后必须落在 `[5.00, 5.05]` 之内。
 
 ```
-equity = 29.3 USDT | order window = [5.0, 10.0] USDT
-  BNBUSDT    OK  qty=0.00800000 @ 696.77 = 5.5742 USDT (19.0% of equity)
-  BTCUSDT    OK  qty=0.00007000 @ 76824.00 = 5.3777 USDT (18.4% of equity)
-  CAKEUSDT   OK  qty=2.72000000 @ 1.8450 = 5.0184 USDT (17.1% of equity)
+equity = 29.3 USDT | target 5.0, ceiling 5.0500, exchange floor 5.0
+  BNBUSDT    NO  nominal_step=0.6958  quantized 5.5662 > 5.05
+  BTCUSDT    NO  nominal_step=0.7664  quantized 5.3648 > 5.05
+  CAKEUSDT   OK  nominal_step=0.0184  qty=2.72 @ 1.844 = 5.0048 USDT (17.1% of equity)
 ```
 
-**资金利用率上限 ~34% 是算术必然，不是配置没调好。** 要改只能改上限或改本金，均需人工签字（D1）。回测必须按这个真实约束算，不能用 29.30 全额。
+**资金利用率上限 ~17% 是算术必然。** 更严重的副作用：单笔压到 5.00 后，**BTCUSDT / BNBUSDT 实质退出可交易集合**——它们的名义步长（0.6958 / 0.7664 USDT）比整个允许窗口（0.05 USDT）还宽。判据是「名义步长 = stepSize × price ≤ 窗口宽度」。当前只剩 CAKEUSDT 恒可成交，而它是三个标的中最薄的（24h 1.5 M）。这是 R14 / D7，需要在 P3 之前决定。
 
 ### 5. 步长陷阱：会写出"看起来成功、实际被拒"的订单
 

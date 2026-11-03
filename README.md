@@ -26,7 +26,7 @@ Binance 现货上的 AI 辅助自动投资系统。当前阶段：**P0 —— �
 
 **场所 = Binance 现货；本地只有 API Key，没有私钥。**
 
-Binance 的 API Key 可以**关闭提币权限**。因此 Key 泄漏的最坏后果从「资金被转走」降级为「资金被乱交易」，而后者的损失上界是单笔 10 USDT + 熔断 1.50 USDT。
+Binance 的 API Key 可以**关闭提币权限**。因此 Key 泄漏的最坏后果是「资金被乱交易」而不是被转走，损失上界是单笔硬上限 5.05 USDT + 熔断 1.50 USDT。
 
 这条前提由三处代码硬断言，不是文档承诺：`assess()`、`build_order_params()`、`tools/account_probe.py`（退出码 3）。
 
@@ -37,7 +37,9 @@ Binance 的 API Key 可以**关闭提币权限**。因此 Key 泄漏的最坏后
 3. 环境变量 `TRADER_LIVE_ORDERS` 未设置
 4. `config/risk_policy.toml` → `[execution] allow_mainnet = false`（即使前三条全开，也只打测试网）
 
-硬资金限制（单笔 5–10 USDT、单笔风险 ≤ 0.30 USDT、累计亏损 1.50 USDT 熔断、最大持仓 1）由 `src/risk/` 独立执行，策略层无权读写。
+硬资金限制（**单笔目标 5.00 / 硬上限 5.05 USDT**、单笔风险 ≤ 0.30 USDT、累计亏损 1.50 USDT 熔断、最大持仓 1）由 `src/risk/` 独立执行，策略层无权读写。
+
+> ⚠️ 单笔 5.00 的直接后果：交易所下限也是 5.00，量化窗口只有 0.05 USDT 宽。按「名义步长 = stepSize × price ≤ 窗口宽度」这条判据，**目前只有 CAKEUSDT 恒可成交**，BTCUSDT / BNBUSDT 的步长粒度比窗口还宽。见 [docs/04 §三](docs/04-venue-audit.md) 与 [R14](docs/07-risks-and-blockers.md)。
 
 ## 目录
 

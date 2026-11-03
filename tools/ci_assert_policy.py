@@ -9,7 +9,7 @@
   * 场所仍是 binance_spot，且 gmgn_bsc 仍在 archived 里；
   * 提币权仍然被要求关闭；
   * 主网仍然不被允许（allow_mainnet = false）；
-  * 交易所下限 5 USDT 与本项目上限 10 USDT 之间仍然存在可行窗口。
+  * 交易所下限 5 USDT 与量化上浮后的硬上限 5.05 USDT 之间仍然存在可行窗口；
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ from src.risk import execution_gate, load_policy  # noqa: E402
 
 # P0 任务书 §5 的四个数字。改了这里就等于改了实验边界，必须是有意的。
 P0_LIMITS = {
-    "max_notional": Decimal("10.00"),
+    "max_notional": Decimal("5.00"),
     "max_risk_budget": Decimal("0.30"),
     "max_cumulative_loss": Decimal("1.50"),
 }
@@ -64,11 +64,17 @@ def main() -> int:
     if not perms.get("require_can_withdraw_false", False):
         failures.append("require_can_withdraw_false must stay true -- this is the whole point")
 
-    # --- 可行窗口：交易所下限 <= 本项目上限 ---
-    if policy.min_notional > policy.max_notional:
+    # --- 可行窗口：交易所下限 < 本项目硬上限（严格小于，否则窗口为空）---
+    if policy.min_notional >= policy.notional_ceiling:
         failures.append(
-            f"no feasible order window: exchange min {policy.min_notional} > "
-            f"policy cap {policy.max_notional}"
+            f"no feasible order window: exchange min {policy.min_notional} >= "
+            f"policy ceiling {policy.notional_ceiling}"
+        )
+    # 量化上浮容许度是 cap 语义的一部分，不许被悄悄放宽成"变相提高上限"
+    if policy.overrun_bps > 200:
+        failures.append(
+            f"max_quantization_overrun_bps={policy.overrun_bps} > 200 -- "
+            "this would silently raise the effective per-order cap"
         )
 
     if failures:
@@ -79,9 +85,10 @@ def main() -> int:
 
     print("ok: venue=binance_spot, execution closed, mainnet refused, limits within P0 budget")
     print(
-        f"     order window = [{policy.min_notional}, {policy.max_notional}] USDT "
-        f"out of {policy.raw['capital']['initial_equity_usdt']} USDT equity"
+        f"     per-order target {policy.max_notional} USDT, ceiling {policy.notional_ceiling} "
+        f"(overrun {policy.overrun_bps} bps), exchange floor {policy.min_notional}"
     )
+    print(f"     equity = {policy.raw['capital']['initial_equity_usdt']} USDT")
     return 0
 
 

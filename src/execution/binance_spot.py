@@ -83,8 +83,8 @@ def build_order_params(
     notional = qty * intent.reference_price
     if notional < intent.filters.min_notional:
         reasons.append(f"below_exchange_min_notional:{notional}<{intent.filters.min_notional}")
-    if notional > policy.max_notional:
-        reasons.append(f"notional_exceeds_cap:{notional}>{policy.max_notional}")
+    if notional > policy.notional_ceiling:
+        reasons.append(f"notional_exceeds_ceiling:{notional}>{policy.notional_ceiling}")
 
     base_url, more = _base_url(policy, gate)
     reasons.extend(more)

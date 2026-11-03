@@ -42,7 +42,24 @@ class Policy:
     # ---- 资金 ----
     @property
     def max_notional(self) -> Decimal:
+        """单笔**目标**金额。取整后的实际值可以略高，见 notional_ceiling。"""
         return Decimal(str(self._get("order_limits", "max_notional_per_order_usdt")))
+
+    @property
+    def overrun_bps(self) -> int:
+        return int(self._get("order_limits", "max_quantization_overrun_bps"))
+
+    @property
+    def notional_ceiling(self) -> Decimal:
+        """硬上限 = 目标 × (1 + 量化上浮容许度)。
+
+        存在的理由：stepSize 是离散的，取整后的名义本金不可能恰好等于目标值。
+        CAKEUSDT 在 5.00 目标下最小合法单是 5.0184 USDT —— 没有这点容许度，
+        整条策略在任何价格下都会被自己的 cap 拒死。
+        """
+        return (self.max_notional * (Decimal(1) + Decimal(self.overrun_bps) / BPS)).quantize(
+            Decimal("0.0001")
+        )
 
     @property
     def min_notional(self) -> Decimal:
@@ -114,7 +131,8 @@ class Policy:
 
 
 _REQUIRED_PROBES = (
-    "max_notional", "min_notional", "max_risk_budget", "max_slippage_bps", "max_fee_bps",
+    "max_notional", "overrun_bps", "notional_ceiling", "min_notional",
+    "max_risk_budget", "max_slippage_bps", "max_fee_bps",
     "max_open_positions", "max_cumulative_loss", "venue_primary", "archived_venues",
     "base_url", "testnet_base_url", "binance_perms", "symbols", "observer_symbols",
     "quote_assets", "forbidden", "execution",
@@ -248,8 +266,8 @@ def assess(
         v.append(f"below_exchange_min_notional:{notional}<{f.min_notional}")
     if notional < policy.min_notional:
         v.append(f"below_policy_min_notional:{notional}<{policy.min_notional}")
-    if notional > policy.max_notional:
-        v.append(f"notional_exceeds_cap:{notional}>{policy.max_notional}")
+    if notional > policy.notional_ceiling:
+        v.append(f"notional_exceeds_ceiling:{notional}>{policy.notional_ceiling}")
 
     # 7) 意图自洽：base_qty × reference_price 应约等于 notional
     if intent.reference_price <= 0:

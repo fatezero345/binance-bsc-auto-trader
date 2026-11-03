@@ -41,36 +41,67 @@ Binance 的签名请求带 `timestamp` + `recvWindow`（默认 5000 ms）。偏�
 
 ## 三、可行性：29.30 USDT 能不能真的下出一单
 
-这是本文件里唯一真正重要的计算。三条约束同时成立才叫"能下单"：
+这是本文件里唯一真正重要的计算。四条约束同时成立才叫"能下单"：
 
-1. 交易所 `minNotional = 5 USDT`（下界）；
-2. 本项目 `max_notional = 10 USDT`（上界）；
-3. **stepSize 量化**必须落在 [5, 10] 之内。
+1. 交易所 `minNotional = 5 USDT`（**下界**）；
+2. 本项目 `max_notional = 5 USDT`（**目标上界**，2026-11-03 由所有者主动从 10 下调）；
+3. **量化上浮容许度** `max_quantization_overrun_bps = 100` → 硬上限 **5.05 USDT**；
+4. **stepSize 量化**后的名义本金必须落在 `[5.00, 5.05]` 之内。
 
-`tools/binance_probe.py` 实算结果：
+### 为什么必须有第 3 条
+
+步长是离散的，取整后的金额不可能恰好等于目标值。CAKEUSDT 在 5.00 目标下的最小合法单是 **5.0184 USDT**——比目标高 0.37%。如果 `max_notional` 是硬墙，这条策略在任何价格下都会被自己的 cap 拒死。
+
+所以 cap 的语义定为：**目标 5.00，硬上限 5.05，超出硬上限一律拒绝**（不四舍五入、不自动缩量）。这 0.05 USDT 不是"偷偷放宽"，而是把"取整不可避免的溢出"显式化并封顶。`tools/ci_assert_policy.py` 断言 `overrun_bps ≤ 200`，防止它被悄悄改成变相提高上限。
+
+### 单笔 = 5.00 之后的实测结果（2026-11-03 13:4x）
 
 ```
-equity = 29.3 USDT | order window = [5.0, 10.0] USDT
-  BNBUSDT    OK  qty=0.00800000 @ 696.77000000 = 5.5742 USDT (19.0% of equity)
-  BTCUSDT    OK  qty=0.00007000 @ 76824.00000000 = 5.3777 USDT (18.4% of equity)
-  CAKEUSDT   OK  qty=2.72000000 @ 1.84500000 = 5.0184 USDT (17.1% of equity)
-  3/3 whitelisted symbols can place an order of at most 10.0 USDT
+equity = 29.3 USDT | per-order target 5.0 USDT, ceiling 5.0500, exchange floor 5.0
+quantisation window width = 0.0500 USDT
+nominal step = stepSize x price ; a symbol is RELIABLY tradeable only if nominal step <= window
+
+  BNBUSDT    NO  nominal_step=0.6958  price-alignment-only
+             quantized_above_budget:5.56616>5.05
+  BTCUSDT    NO  nominal_step=0.7664  price-alignment-only
+             quantized_above_budget:5.36479>5.05
+  CAKEUSDT   OK  nominal_step=0.0184  reliable
+             qty=2.72000000 @ 1.84 = 5.0048 USDT (17.1% of equity)
+
+1/3 whitelisted symbols can place an order inside the 5.0-5.05 USDT window
 ```
+
+### 这一节的结论：一个通用判据
+
+> **名义步长 = `stepSize × price`。只有当「名义步长 ≤ 量化窗口宽度（= 硬上限 − 交易所下限 = 0.05 USDT）」时，该标的才恒可成交。**
+
+| 标的 | stepSize | price | 名义步长 | 与 0.05 窗口 |
+| --- | --- | --- | --- | --- |
+| CAKEUSDT | 0.01 | 1.840 | **0.0184** | ≤ 0.05 → ✅ 恒可成交 |
+| BNBUSDT | 0.001 | 695.86 | **0.6958** | ≫ 0.05 → ❌ 只能靠价格恰好落在格点上 |
+| BTCUSDT | 0.00001 | 76,675 | **0.7664** | ≫ 0.05 → ❌ 同上 |
+
+**含义**：把单笔压到 5.00 之后，BTCUSDT 与 BNBUSDT **实质上退出可交易集合**——不是被代码禁用，而是它们的步长粒度（0.70 / 0.77 USDT）比整个允许窗口（0.05 USDT）还宽。理论上当价格落到某个 1% 宽的带内（例如 BNB 在 ~625–631 USDT 时，8 步 = 5.00–5.05）仍然可以成交，但这属于运气而不是设计。
+
+两个因此成立的判断：
+
+1. **当前的 5.00 单笔上限等于「只做 CAKEUSDT」。** 而 CAKEUSDT 的 24h 成交额只有 1.5 M USD，是三个标的中最薄的。
+2. 想让 BTC/BNB 回到可交易，只有三条路：(a) 放宽单笔上限到 ≥5.6；(b) 把容许度放大到 ~12%（就不叫 5 了）；(c) 换 `stepSize` 与价格之比更小的标的。这是一个需要人工签字的选择（[07 D6](07-risks-and-blockers.md)）。
 
 ### 步长陷阱（这是最容易写出"看起来成功、实际被拒"的地方）
 
-CAKEUSDT：`5 / 1.845 = 2.7100` → 向下取整到 0.01 步长 → **2.71 × 1.845 = 4.99885 < 5** ❌
-最小合法量是 **2.72**（5.0184 USDT），必须**向上**对齐。
+CAKEUSDT：`5 / 1.84 = 2.7174` → 向下取整到 0.01 步长 → **2.71 × 1.84 = 4.9864 < 5** ❌
+最小合法量是 **2.72**（5.0048 USDT），必须**向上**对齐。
 
 若代码用 `round()` 或 floor，会得到一个交易所必然拒掉的订单，而在本地日志里它"已经下了"。因此：
 
-- `plan_buy_quantity()` 从 `minNotional / price` **向上**量化，并校验结果仍在预算内；
+- `plan_buy_quantity()` 从 `minNotional / price` **向上**量化，并校验结果仍在硬上限内；
 - 量化失败一律 `reject`，不四舍五入、不自动加码；
 - `assess()` 与 `build_order_params()` 各校验一次步长（双保险，且两处都会出现在测试里）。
 
 ### 资金利用率的必然上限
 
-单笔上限 10 USDT、下限 5 USDT、本金 29.30 USDT → **最多动用约 34%**，实测单笔 5.0–5.6 USDT。这不是配置没调好，是「低本金 + 交易所下限 + 严格单笔上限」三条叠加的算术结果。要改变它，只能改上限或改本金——两者都得人工签字。
+单笔目标 5.00、硬上限 5.05、本金 29.30 USDT → 单笔最多动用约 **17%**（实测 CAKE 5.0048 USDT）。这不是配置没调好，是「低本金 + 交易所下限 + 严格单笔上限」三条叠加的算术结果。要改变它，只能改上限或改本金——两者都得人工签字。
 
 ## 四、P0 没做到的部分（缺口，不是"已通过"）
 

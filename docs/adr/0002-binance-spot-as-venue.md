@@ -32,13 +32,13 @@ ADR-0001 把交易场所定在 BSC 上的 GMGN 托管钱包，理由是任务书
 1. **`https://api.binance.com/api/v3/time` 可达**，HTTP 200（[evidence/raw/binance_server_time.json](../evidence/raw/binance_server_time.json)）。
 2. **`/api/v3/exchangeInfo` 可读到三条白名单交易对的真实过滤器**：BTCUSDT / BNBUSDT / CAKEUSDT 均 `status=TRADING`，`minNotional=5.00000000`（[evidence/raw/binance_exchange_info.json](../evidence/raw/binance_exchange_info.json)）。
 3. **权限位可读**：`/api/v3/account` 返回 `canTrade` / `canWithdraw` / `canDeposit` / `permissions`。这可直接回答任务书 §3 的八项，而 GMGN 侧只能靠文档推断。
-4. **可行窗口存在**：29.30 USDT 本金、单笔上限 10 USDT、交易所下限 5 USDT → 每单 5–10 USDT 可落。实测三对都能下出合法单（[04 §三](../04-venue-audit.md)）。
+4. **可行窗口存在**：29.30 USDT 本金、单笔**目标 5.00 / 硬上限 5.05**（D1 后由 10 下调）、交易所下限 5 USDT。这 0.05 USDT 的窗口只够吸收一次步长取整，后果见 [04 §三](../04-venue-audit.md)：当前只有 CAKEUSDT 恒可成交。（本文英文数字沿用的是 10 上限于 2026-11-03 13:3x 被下调前的表述，已按 D1 更新。）
 
 ## 后果
 
 ### 收益（相对 ADR-0001 的实质改进）
 
-1. **提币权可以物理关闭。** 这是本次改变里唯一真正提升安全等级的一点：Key 泄漏的最坏后果从「资金被转走」降级为「资金被乱交易」，而后者的损失有上限（单笔 10 USDT、累计亏损 1.50 熔断）。
+1. **提币权可以物理关闭。** 这是本次改变里唯一真正提升安全等级的一点：Key 泄漏的最坏后果从「资金被转走」降级为「资金被乱交易」，而后者的损失有上限（单笔硬上限 5.05 USDT、累计亏损 1.50 熔断）。
 2. **权限粒度可审计。** 不再是「一把 Key 全权」，而是三档独立权限，且 `permissions` 必须是 `["SPOT"]` 的子集——出现 `MARGIN` 直接被风控拒绝。
 3. **有测试网。** `testnet.binance.vision` 让 P3 可以在零真实资金下跑通全链路；GMGN 没有对应能力。
 4. **过滤器是一等公民。** stepSize / minNotional 是可读、可测、可断言的数字，而不是「大概能行」。
@@ -48,7 +48,7 @@ ADR-0001 把交易场所定在 BSC 上的 GMGN 托管钱包，理由是任务书
 1. **交易所是交易对手。** 冻结、风控封号、地域限制、维护窗口——本地代码一行都缓解不了。且 29.30 USDT 的账户本身就是高风险画像。
 2. **时钟偏差成为硬依赖。** 签名请求依赖 `timestamp` 与 `recvWindow`。本次实测 1 小时内偏差从 **−163 ms 漂到 −2762 ms**，已超过策略上限 1000 ms（[04 §一](../04-venue-audit.md)）。**不修时钟，live 模式不可用。**
 3. **KYC / 地域 / 出入金**全部转移到交易所侧，本地不可控，也不再是本仓库能审计的部分。
-4. **资金利用率被双边挤压。** 上限 10 USDT、下限 5 USDT，29.30 USDT 本金最多动用约 34%——单笔实际 5.0–5.6 USDT（实测）。这是规则的必然结果，不是 bug。
+4. **资金利用率被双边挤压。** 目标 5.00、硬上限 5.05、交易所下限 5.00，29.30 USDT 本金单笔最多动用约 17%（实测 CAKEUSDT 5.0048 USDT）。更严重的副作用是 R14：BTC/BNB 的名义步长比整个窗口还宽，实际只剩最薄的 CAKEUSDT 可做。
 5. **限价单暂不开放。** P0 只允许 `type=MARKET`，因为限价单引入挂单状态机与撤单路径，那是 P3 的工作量。
 
 ### 触发重估的条件

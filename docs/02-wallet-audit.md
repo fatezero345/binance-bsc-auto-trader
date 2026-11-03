@@ -11,7 +11,7 @@
 | 3 | 是否支持交易模拟 | ✅ **支持，且强于 DEX** | `testnet.binance.vision` 真实撮合 + `[execution] dry_run` |
 | 4 | 是否支持 Swap | ✅ **支持** | `POST /api/v3/order`（P0 只开 `type=MARKET`） |
 | 5 | 是否能限制目标合约 | ✅ **可限制**（本地白名单 + 交易所过滤器双约束） | `[whitelist].symbols` + `SymbolFilters` |
-| 6 | 是否能限制单笔金额 | ✅ **可限制**（5–10 USDT 双向夹逼） | `min_notional=5` / `max_notional=10` |
+| 6 | 是否能限制单笔金额 | ✅ **可限制**（5.00–5.05 USDT 双向夹逼） | `min_notional=5.00` / `notional_ceiling=5.05` |
 | 7 | 是否能限制授权额度 | ✅ **等价物更强**：提币权必须为 false | `[venue.binance].require_can_withdraw_false` |
 | 8 | 是否能独立控制签名权限 | ✅ **可**，且可撤销 | API Key 三档权限 + IP 白名单 + 随时删除 |
 
@@ -24,7 +24,7 @@ ADR-0002 整个方案成立与否，只取决于这一条。
 | 场景 | Key 泄漏后的最坏后果 |
 | --- | --- |
 | 提币权 **开着** | 资金被转走，29.30 USDT 全失，本地无任何代码能拦 |
-| 提币权 **关着** | 只能在本账户内乱交易；损失上界 = 单笔 10 USDT + 熔断 1.50 USDT |
+| 提币权 **关着** | 只能在本账户内乱交易；损失上界 = 单笔硬上限 5.05 USDT + 熔断 1.50 USDT |
 
 所以 `src/risk/policy.py::assess()` 里有一条**硬断言**：
 

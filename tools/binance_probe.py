@@ -4,7 +4,7 @@
 回答三个问题：
   1. 场所通不通（服务器时间 + 时钟偏差）；
   2. 三条白名单交易对的过滤器是什么（stepSize / minNotional / tickSize）；
-  3. **在 29.30 USDT 本金、单笔上限 10 USDT 下，每个交易对能不能真的下出一单**
+3. **在当前业务窗口下（目标 5.00 / 硬上限 5.05 / 交易所下限 5.00），每个交易对能不能真的下出一单**
      —— 这一条靠 plan_buy_quantity 实算，不靠印象。
 
 用法：
@@ -85,32 +85,42 @@ def main(argv: list[str]) -> int:
     section("feasibility: can we actually place one order?")
     print(
         f"equity = {policy.raw['capital']['initial_equity_usdt']} USDT | "
-        f"order window = [{policy.min_notional}, {policy.max_notional}] USDT"
+        f"per-order target {policy.max_notional} USDT, ceiling {policy.notional_ceiling}, "
+        f"exchange floor {policy.min_notional}"
     )
+    window = policy.notional_ceiling - policy.min_notional
+    print(f"  quantisation window width = {window:.4f} USDT "
+          f"(ceiling - exchange floor)")
+    print(f"  nominal step = stepSize x price ; a symbol is RELIABLY tradeable only if "
+          f"nominal step <= window")
+    print()
     feasible = 0
     for s in sorted(policy.symbols):
         f = filters[s]
         price = Decimal(tickers[s]["lastPrice"])
+        nominal_step = f.step_size * price
         qty, err = plan_buy_quantity(
-            price, policy.max_notional, f.min_notional, f.step_size, f.min_qty
+            price, policy.notional_ceiling, f.min_notional, f.step_size, f.min_qty
         )
+        alignment = "reliable" if nominal_step <= window else "price-alignment-only"
         if err:
-            print(f"  {s:<10} NO  {err}")
+            print(f"  {s:<10} NO  nominal_step={nominal_step:.4f}  {alignment}\n"
+                  f"             {err}")
             continue
         notional = qty * price
         util = (notional / Decimal(policy.raw["capital"]["initial_equity_usdt"])) * 100
         print(
-            f"  {s:<10} OK  qty={qty} @ {price} = {notional:.4f} USDT "
-            f"({util:.1f}% of equity)"
+            f"  {s:<10} OK  nominal_step={nominal_step:.4f}  {alignment}\n"
+            f"             qty={qty} @ {price} = {notional:.4f} USDT ({util:.1f}% of equity)"
         )
         feasible += 1
 
     if feasible == 0:
-        print("\n  !! no whitelisted symbol can be traded at the current budget")
+        print("\n  !! no whitelisted symbol can be traded inside the current window")
     else:
         print(
             f"\n  {feasible}/{len(policy.symbols)} whitelisted symbols can place an order "
-            f"of at most {policy.max_notional} USDT"
+            f"inside the {policy.min_notional}-{policy.notional_ceiling} USDT window"
         )
 
     section("execution state")

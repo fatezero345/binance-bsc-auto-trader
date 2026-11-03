@@ -82,11 +82,19 @@ class TestPolicyLoad(unittest.TestCase):
 
     def test_hard_limits(self):
         p = load_policy()
-        self.assertEqual(p.max_notional, D("10.00"))
+        self.assertEqual(p.max_notional, D("5.00"))
+        self.assertEqual(p.overrun_bps, 100)
+        self.assertEqual(p.notional_ceiling, D("5.0500"))
         self.assertEqual(p.min_notional, D("5.00"))
         self.assertEqual(p.max_risk_budget, D("0.30"))
         self.assertEqual(p.max_cumulative_loss, D("1.50"))
         self.assertEqual(p.max_open_positions, 1)
+
+    def test_ceiling_leaves_a_non_empty_order_window(self):
+        """cap 5.00 + 交易所下限 5.00 → 窗口全靠量化上浮容许度撑开，否则恒不可成交。"""
+        p = load_policy()
+        self.assertLess(p.min_notional, p.notional_ceiling)
+        self.assertAlmostEqual(float(p.notional_ceiling - p.min_notional), 0.05, places=4)
 
     def test_execution_ships_closed(self):
         p = load_policy()
@@ -135,6 +143,21 @@ class TestQuantization(unittest.TestCase):
         qty, err = plan_buy_quantity(PRICE["BTCUSDT"], D("5.10"), D("5"), D("0.00001"), D("0.00001"))
         self.assertIsNone(qty)
         self.assertIn("quantized_above_budget", err)
+
+    def test_nominal_step_decides_whether_a_five_dollar_cap_is_reachable(self):
+        """把单笔压到 5.00 后的通用判据：名义步长 = stepSize × price。
+
+        只有当「名义步长 ≤ 量化窗口宽度(= ceiling − 交易所下限 = 0.05 USDT)」时，
+        该标的才**恒**可成交；否则要看价格是否恰好落在某个步长格点上。
+        """
+        window = D("0.05")          # 5.05 ceiling - 5.00 floor
+        for symbol, price in PRICE.items():
+            nominal = FILTERS[symbol].step_size * price
+            with self.subTest(symbol=symbol):
+                if symbol == "CAKEUSDT":
+                    self.assertLessEqual(nominal, window)      # 0.01 × 1.844 ≈ 0.0184
+                else:
+                    self.assertGreater(nominal, window)        # BNB ≈ 0.70 / BTC ≈ 0.77
 
     def test_plan_buy_rejects_degenerate_inputs(self):
         self.assertIsNotNone(plan_buy_quantity(D("0"), D("10"), D("5"), D("0.01"), D("0.01"))[1])
@@ -186,14 +209,44 @@ class TestRiskGate(unittest.TestCase):
         self.assertIn("venue_archived:gmgn_bsc", d.violations)
         self.assertTrue(any(v.startswith("venue_not_primary") for v in d.violations))
 
-    def test_notional_above_cap(self):
-        d = assess(intent(qty="5.42", notional="9.99448", stop_distance_bps=300),
+    def test_notional_target_and_ceiling(self):
+        # 目标 5.00，硬上限 5.05。2.72@1.845=5.0184 在窗口内
+        d = assess(intent(qty="2.72", notional="5.0184", stop_distance_bps=300),
                    state(), GOOD_PERMS, self.p)
-        self.assertTrue(d.approved, d.violations)          # 9.99 合法
-        d2 = assess(intent(qty="5.50", notional="10.142", stop_distance_bps=300),
+        self.assertTrue(d.approved, d.violations)
+        # 2.73@1.845=5.03685 仍在上浮容许度内
+        d2 = assess(intent(qty="2.73", notional="5.03685", stop_distance_bps=300),
                     state(), GOOD_PERMS, self.p)
-        self.assertFalse(d2.approved)
-        self.assertTrue(any(v.startswith("notional_exceeds_cap") for v in d2.violations))
+        self.assertTrue(d2.approved, d2.violations)
+        # 2.74@1.845=5.0553 超硬上限
+        d3 = assess(intent(qty="2.74", notional="5.0553", stop_distance_bps=300),
+                    state(), GOOD_PERMS, self.p)
+        self.assertFalse(d3.approved)
+        self.assertTrue(any(v.startswith("notional_exceeds_ceiling") for v in d3.violations))
+
+    def test_five_dollar_cap_makes_btc_and_bnb_untradeable(self):
+        """把单笔压到 5.00 的直接后果：BTC/BNB 的最小合法单就超过硬上限 5.05。
+
+        这是算术，不是配置失误 —— 步长粒度决定最小可成交量：
+          BNBUSDT step=0.001 @ 696.53 → 最小 0.008 BNB = 5.5722 USDT
+          BTCUSDT step=0.00001 @ 76842.01 → 最小 0.00007 BTC = 5.3789 USDT
+        """
+        for symbol in ("BTCUSDT", "BNBUSDT"):
+            with self.subTest(symbol=symbol):
+                f = FILTERS[symbol]
+                qty, err = plan_buy_quantity(
+                    PRICE[symbol], self.p.notional_ceiling, f.min_notional, f.step_size, f.min_qty
+                )
+                self.assertIsNone(qty)
+                self.assertIn("quantized_above_budget", err)
+
+        # CAKE 的步长够细，5.00 目标仍然可成交
+        f = FILTERS["CAKEUSDT"]
+        cake_qty, cake_err = plan_buy_quantity(
+            PRICE["CAKEUSDT"], self.p.notional_ceiling, f.min_notional, f.step_size, f.min_qty
+        )
+        self.assertIsNone(cake_err)
+        self.assertEqual(cake_qty, D("2.72"))
 
     def test_notional_below_exchange_min(self):
         d = assess(intent(qty="2.71", notional="4.99724"), state(), GOOD_PERMS, self.p)
@@ -211,14 +264,16 @@ class TestRiskGate(unittest.TestCase):
         self.assertTrue(any(v.startswith("base_qty_below_min") for v in d.violations))
 
     def test_risk_budget(self):
-        # 10 USDT × 5% = 0.50 > 0.30
-        d = assess(intent(qty="5.42", notional="9.99448", stop_distance_bps=500), state(), GOOD_PERMS, self.p)
+        # 5.0184 USDT × 6% = 0.3011 > 0.30
+        d = assess(intent(qty="2.72", notional="5.0184", stop_distance_bps=600),
+                   state(), GOOD_PERMS, self.p)
         self.assertFalse(d.approved)
         self.assertTrue(any(v.startswith("risk_budget_exceeded") for v in d.violations))
-        # 10 USDT × 3% = 0.30 == 上限，不超即通过
-        d2 = assess(intent(qty="5.42", notional="9.99448", stop_distance_bps=300), state(), GOOD_PERMS, self.p)
+        # 5.0184 × 5.97% = 0.29960 ≤ 0.30，不超即通过
+        d2 = assess(intent(qty="2.72", notional="5.0184", stop_distance_bps=597),
+                    state(), GOOD_PERMS, self.p)
         self.assertTrue(d2.approved, d2.violations)
-        self.assertEqual(d2.computed_risk_usdt, D("0.2998"))
+        self.assertEqual(d2.computed_risk_usdt, D("0.2996"))
 
     def test_circuit_breaker_blocks_everything(self):
         d = assess(intent(), state(realized_loss_usdt=D("1.50")), GOOD_PERMS, self.p)

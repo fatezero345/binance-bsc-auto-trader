@@ -102,7 +102,7 @@ plan_buy_quantity(price, budget, minNotional, stepSize, minQty)
 落地为四条硬约束：
 
 1. **`OrderIntent` 没有 `is_approved` 字段。** 策略层构造不出"已批准"的意图；批准只能来自 `assess()` 的返回值。
-2. **`strategy` 不允许读 `risk_policy.toml`。** 它连 10 USDT / 0.30 USDT / 5 USDT 这三个数字都拿不到，无法针对边界做特化（既不能卡着 9.99 反复试探，也不会有"我以为上限是 20"的幻觉）。
+2. **`strategy` 不允许读 `risk_policy.toml`。** 它连 5.00 / 5.05 / 0.30 USDT 这几个数字都拿不到，无法针对边界做特化（既不能卡着 5.04 反复试探，也不会有"我以为上限是 10"的幻觉）。
 3. **`AccountPermissions` 是 `assess()` 的必填参数。** 想绕过提币权检查就得显式构造一个假对象——那在 code review 里一眼可见。
 4. **fail_closed。** `load_policy()` 启动期全字段校验，缺字段直接崩；`assess()` 里"算不出来"一律计入 violations。
 
@@ -117,7 +117,7 @@ plan_buy_quantity(price, budget, minNotional, stepSize, minQty)
 | **时钟漂移** | 无此面 | 🔴 **实证超限 2.7 倍**（R2）→ live 前必修 |
 | 白名单被绕过 | 本地可拦 | 本地可拦（symbol 白名单 + 过滤器双约束） |
 | 上游字段脏数据 | 已实证（WBNB 虚高 9.5%） | 未实测，P1 用契约测试盯住（R6） |
-| 资金利用率 | 低（DEX 无下限） | 结构性上限 ~34%（R4，算术必然） |
+| 资金利用率 | 低（DEX 无下限） | 结构性上限 ~17%，且仅 CAKEUSDT 可成交（R4 / R14） |
 
 **结论**：换场所不是"更安全"或"更危险"，而是**风险重心从「谁能拿到私钥」转到「权限位配得对不对 + 时钟准不准」**。所以 [07](07-risks-and-blockers.md) 里 R1（权限位）与 R2（时钟）排前两位，而不是滑点。
 
