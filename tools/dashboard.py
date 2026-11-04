@@ -129,6 +129,23 @@ def _sparkline(values: list[float], w: int = 900, h: int = 220, pad: int = 8) ->
 </svg>'''
 
 
+def _stale_banner(ts) -> str:
+    """快照超过 15 分钟就挂警告。2026-11-04 实际踩过：快照任务被禁用 7 小时，
+    面板一直显示 7 小时前的权益，差点当成当前收益。"""
+    if not ts:
+        return ""
+    try:
+        from datetime import datetime as _dt
+        age = (_dt.now() - _dt.strptime(str(ts)[:19], "%Y-%m-%dT%H:%M:%S")).total_seconds()
+    except Exception:
+        return ""
+    if age <= 900:
+        return ""
+    return ('<div style="background:rgba(232,180,74,.12);border:1px solid #e8b44a;'
+            'color:#e8b44a;border-radius:8px;padding:9px 12px;font-size:12px;margin-bottom:14px">'
+            f'⚠ 数据已过期 {int(age/60)} 分钟 —— 快照任务可能停了，下面的权益与盈亏都是旧值。</div>')
+
+
 def _kronos_html(k: dict) -> str:
     verdict = ("样本不足", "var(--muted)")
     if k["t"] is not None:
@@ -280,6 +297,7 @@ def build() -> str:
 <body>
   <h1>自动交易 · 盈亏看板</h1>
   <div class="sub">最后更新 {html.escape(str(last.get('ts','-')))} · 数据来自本地文件，不联网</div>
+  {_stale_banner(last.get('ts'))}
 
   <div class="cards">
     <div class="card"><div class="k">总权益</div>
