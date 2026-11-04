@@ -29,6 +29,7 @@ prob_up 是模型自己给出的方向概率，它连续、总是有值、天然
 from __future__ import annotations
 
 import json
+import statistics
 import urllib.error
 import urllib.request
 
@@ -71,13 +72,17 @@ class KronosDecision:
 class KronosClient:
     def __init__(self, url: str = DEFAULT_URL, timeout: float = 30.0,
                  lookback: int = 200, pred_len: int = 6, samples: int = 16,
-                 min_factor: float = 0.25):
+                 min_factor: float = 0.25, repeats: int = 5):
         self.url = (url or DEFAULT_URL).rstrip("/")
         self.timeout = timeout
         self.lookback = lookback
         self.pred_len = pred_len
         self.samples = samples
         self.min_factor = min_factor
+        # 去噪：单次采样的 prob_up 标准差实测约 0.10（同一段不变的 K 线连问 6 次，
+        # 极差能到 0.28）。这样的系数等于让随机数决定仓位。
+        # 取 repeats 次的中位数，把抖动压下去。
+        self.repeats = max(1, int(repeats))
 
     # ------------------------------------------------------------------ 传输
     def _post(self, path: str, body: dict) -> dict:
@@ -123,30 +128,45 @@ class KronosClient:
             "pred_len": self.pred_len,
             "sample_count": self.samples,
         }
-        try:
-            out = self._post("/predict", body)
-        except urllib.error.HTTPError as exc:
-            detail = ""
+        probs, meds, p10s, p90s, elapsed = [], [], [], [], 0
+        last_err = None
+        for _ in range(self.repeats):
             try:
-                detail = (exc.read() or b"").decode("utf-8", "replace")[:160]
-            except Exception:                                # noqa: BLE001
-                pass
-            return KronosDecision(False, error=f"HTTP {exc.code}: {detail}")
-        except Exception as exc:                             # noqa: BLE001
-            return KronosDecision(False, error=f"{type(exc).__name__}: {str(exc)[:120]}")
+                out = self._post("/predict", body)
+            except urllib.error.HTTPError as exc:
+                detail = ""
+                try:
+                    detail = (exc.read() or b"").decode("utf-8", "replace")[:160]
+                except Exception:                            # noqa: BLE001
+                    pass
+                last_err = f"HTTP {exc.code}: {detail}"
+                break
+            except Exception as exc:                         # noqa: BLE001
+                last_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+                break
+            try:
+                d = out["distribution"]["close_change_pct"]
+                probs.append(float(d["prob_up"]))
+                meds.append(float(d["median"]))
+                p10s.append(float(d["p10"]))
+                p90s.append(float(d["p90"]))
+                elapsed += int(out.get("elapsed_ms") or 0)
+            except (KeyError, TypeError, ValueError) as exc:
+                last_err = f"bad payload: {exc}"
+                break
 
-        try:
-            d = out["distribution"]["close_change_pct"]
-            prob_up = float(d["prob_up"])
-            factor = max(self.min_factor, min(1.0, prob_up))
-            return KronosDecision(
-                True,
-                prob_up=prob_up,
-                median_change_pct=float(d["median"]),
-                p10=float(d["p10"]),
-                p90=float(d["p90"]),
-                size_factor=factor,
-                elapsed_ms=int(out.get("elapsed_ms") or 0),
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            return KronosDecision(False, error=f"bad payload: {exc}")
+        if not probs:
+            return KronosDecision(False, error=last_err or "no sample")
+
+        # 中位数：对采样噪声稳健，比均值更抗离群
+        prob_up = statistics.median(probs)
+        factor = max(self.min_factor, min(1.0, prob_up))
+        return KronosDecision(
+            True,
+            prob_up=prob_up,
+            median_change_pct=statistics.median(meds),
+            p10=statistics.median(p10s),
+            p90=statistics.median(p90s),
+            size_factor=factor,
+            elapsed_ms=elapsed,
+        )

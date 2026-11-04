@@ -91,6 +91,7 @@ def kronos() -> "KronosClient | None":
             pred_len=int(cfg.get("pred_len", 6)),
             samples=int(cfg.get("samples", 16)),
             min_factor=float(cfg.get("min_factor", 0.25)),
+            repeats=int(cfg.get("repeats", 5)),
         )
     return _KRONOS
 RATE_LIMIT_SLEEP_S = 1800    # 撞到 429/418 就停半小时，绝不继续请求        # 下单失败后，该标的 30 分钟内不再重试
@@ -249,6 +250,16 @@ def _live(policy: Policy) -> tuple[Policy, object]:
     return lp, execution_gate(lp, environ={"TRADER_LIVE_ORDERS": "1"})
 
 
+def min_executable_notional(price: Decimal, filters) -> Decimal:
+    """该标的最小可成交名义金额：满足 minNotional 且是 stepSize 的整数倍。"""
+    one_step = (filters.step_size * price).quantize(Decimal("0.0001"))
+    if one_step >= filters.min_notional:
+        return one_step
+    # 一步不够 minNotional，需要向上取整到足够的步数
+    steps = (filters.min_notional / one_step).to_integral_value(rounding="ROUND_CEILING")
+    return (steps * one_step).quantize(Decimal("0.0001"))
+
+
 def klines_to_bars(kl: list) -> list:
     """币安 klines 数组 -> Kronos 需要的 bar 字典。"""
     from datetime import datetime, timezone
@@ -303,7 +314,18 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
             log("kronos", symbol=symbol, **kd.as_dict())
             if kd.ok and kd.size_factor < 1.0:
                 before = budget
-                budget = (budget * Decimal(str(kd.size_factor))).quantize(Decimal("0.0001"))
+                reduced = (budget * Decimal(str(kd.size_factor))).quantize(Decimal("0.0001"))
+                # 缩小后的预算可能低于交易所的最小可成交量（例如 BTC 一步 = 0.0001
+                # = 7.64 USDT）。这时不是"出错"，而是 Kronos 想要一个买不到的尺寸 ——
+                # 抬到最小可成交量并如实记账，否则该标的会被永久排除（实测 38 次被拒）。
+                min_exec = min_executable_notional(snap.price, snap.filters)
+                if reduced < min_exec:
+                    log("kronos_floor", symbol=symbol, factor=round(kd.size_factor, 4),
+                        reduced=str(reduced), floor=str(min_exec),
+                        note="Kronos 的尺寸低于交易所最小可成交量，抬到最小值")
+                    budget = min_exec
+                else:
+                    budget = reduced
                 log("kronos_sized", symbol=symbol, before=str(before), after=str(budget),
                     factor=round(kd.size_factor, 4))
         except Exception as exc:                                # noqa: BLE001
