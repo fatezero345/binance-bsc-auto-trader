@@ -303,7 +303,7 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
 
 
 def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
-            pos: Position, why: str, st: dict) -> None:
+            pos: "Position | None", why: str, st: dict) -> None:
     """平仓。按**真实可用余额**卖出（手续费从基础币扣，不能用 pos.qty）。"""
     try:
         snap = bp.snapshot(sym)
@@ -319,6 +319,21 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
         st["closed_ts"][sym] = int(time.time())
         save_state(st)
         log("flat_no_balance", symbol=sym, why=why)
+        return
+
+    # 2026-11-04 实盘：残量落到 minNotional 以下是**卖不掉的**。
+    # BNB 持有 0.00793447，按 step 0.001 向下 = 0.007 -> 0.007*693.81 = 4.86 < 5
+    # 卖 0.007 被 NOTIONAL 拒，卖 0.008 又超过持仓 —— 死循环 82 次，最后把 IP 打进 418。
+    # 正确做法：认赔这笔灰尘，记进账本并从持仓里移除，**不要每 5 分钟重试一次**。
+    sellable = qty * snap.price
+    if sellable < snap.filters.min_notional:
+        st.setdefault("dust", {})[sym] = {"qty": str(qty), "value_usdt": str(sellable)}
+        st["positions"].pop(sym, None)
+        st["closed_ts"][sym] = int(time.time())
+        save_state(st)
+        log("dust_unsellable", symbol=sym, qty=str(qty), value_usdt=str(sellable),
+            min_notional=str(snap.filters.min_notional),
+            note="residual below exchange minimum; written off instead of retrying forever")
         return
 
     intent = OrderIntent(venue=Venue.BINANCE_SPOT, symbol=sym, side=Side.SELL,
@@ -351,6 +366,13 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
         log("order_failed", side="SELL", symbol=sym, error=str(exc)[:300], qty=str(qty))
         return
 
+    if pos is None:
+        # 灰尘回收：没有可靠的建仓成本，不编 pnl
+        st.get("dust", {}).pop(sym, None)
+        save_state(st)
+        log("dust_recovered", symbol=sym, qty=str(qty), exit=float(snap.price),
+            proceeds_usdt=str((qty * snap.price).quantize(Decimal("0.0001"))))
+        return
     pnl = (float(snap.price) - pos.entry_price) * float(qty)
     st["positions"].pop(sym, None)
     st["closed_ts"][sym] = int(time.time())
@@ -399,6 +421,22 @@ def _tick_locked() -> int:
             stop=pos.stop_price, tp=pos.tp_price, decision=why)
         if why:
             do_exit(policy, key, secret, live, sym, pos, why, st)
+
+    # 1.5) 灰尘回收：残量涨回 minNotional 以上就卖掉，别白扔
+    for sym in list(st.get("dust", {})):
+        try:
+            snap = bp.snapshot(sym)
+            price = Decimal(str(snap.price))
+            qty = quantize_down(Decimal(st["dust"][sym]["qty"]), snap.filters.step_size)
+            value = qty * price
+            if value >= snap.filters.min_notional:
+                log("dust_recoverable", symbol=sym, qty=str(qty), value_usdt=str(value))
+                do_exit(policy, key, secret, live, sym, None, "dust_recovery", st)
+            else:
+                log("dust_waiting", symbol=sym, value_usdt=str(value),
+                    need=str(snap.filters.min_notional))
+        except Exception as exc:                               # noqa: BLE001
+            log("dust_error", symbol=sym, error=str(exc)[:160])
 
     # 2) 入场
     for sym in symbols:
