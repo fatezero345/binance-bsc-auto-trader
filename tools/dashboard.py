@@ -41,6 +41,59 @@ def _read_jsonl(p: Path) -> list[dict]:
     return out
 
 
+def kronos_stats(ledger: list[dict]) -> dict:
+    """把建仓时的 Kronos 系数与平仓盈亏配对。
+    口径与 tools/kronos_scorecard.py、插件 index.js 完全一致：FIFO 配对。"""
+    last: dict[str, float] = {}
+    q: dict[str, list] = {}
+    pairs: list[dict] = []
+    orphan = 0
+    with_factor = 0
+    for r in ledger:
+        sym = r.get("symbol")
+        if not sym:
+            continue
+        k = r.get("kind")
+        if k == "kronos" and r.get("ok") and isinstance(r.get("size_factor"), (int, float)):
+            last[sym] = float(r["size_factor"])
+        elif k == "bought":
+            q.setdefault(sym, []).append({"ts": r.get("ts"), "factor": last.get(sym)})
+            if last.get(sym) is not None:
+                with_factor += 1
+        elif k == "sold" and isinstance(r.get("pnl_usdt"), (int, float)):
+            bucket = q.get(sym) or []
+            e = bucket.pop(0) if bucket else None
+            if not e or e["factor"] is None:
+                orphan += 1
+                continue
+            pairs.append({"symbol": sym, "factor": e["factor"],
+                          "pnl": float(r["pnl_usdt"]), "why": r.get("why")})
+
+    def agg(g):
+        if not g:
+            return None
+        v = [x["pnl"] for x in g]
+        return {"n": len(v), "mean": sum(v) / len(v), "sum": sum(v),
+                "win": sum(1 for x in v if x > 0) / len(v) * 100}
+
+    high = [x for x in pairs if x["factor"] >= 0.60]
+    low = [x for x in pairs if x["factor"] < 0.40]
+    mid = [x for x in pairs if 0.40 <= x["factor"] < 0.60]
+
+    tv = None
+    if len(high) >= 2 and len(low) >= 2:
+        import statistics as st
+        a = [x["pnl"] for x in high]
+        b = [x["pnl"] for x in low]
+        se = (st.variance(a) / len(a) + st.variance(b) / len(b)) ** 0.5
+        if se:
+            tv = (st.mean(a) - st.mean(b)) / se
+
+    return {"pairs": len(pairs), "with_factor": with_factor, "orphan": orphan,
+            "high": agg(high), "mid": agg(mid), "low": agg(low), "t": tv,
+            "recent": pairs[-8:][::-1]}
+
+
 def _sparkline(values: list[float], w: int = 900, h: int = 220, pad: int = 8) -> str:
     if len(values) < 2:
         return '<div class="empty">数据点不足，等下一次快照</div>'
@@ -76,6 +129,50 @@ def _sparkline(values: list[float], w: int = 900, h: int = 220, pad: int = 8) ->
 </svg>'''
 
 
+def _kronos_html(k: dict) -> str:
+    verdict = ("样本不足", "var(--muted)")
+    if k["t"] is not None:
+        if abs(k["t"]) < 1.5:
+            verdict = ("看不出差别", "var(--muted)")
+        elif k["t"] > 0:
+            verdict = ("高分组更好", "var(--pos)")
+        else:
+            verdict = ("高分组更差", "var(--neg)")
+
+    rows = []
+    for name, rng, s in (("高分组", ">=0.60", k["high"]),
+                         ("中分组", "0.40-0.60", k["mid"]),
+                         ("低分组", "<0.40", k["low"])):
+        if not s:
+            rows.append('<tr><td>' + name + '</td><td class="muted" colspan="3">-</td></tr>')
+        else:
+            color = "var(--pos)" if s["mean"] >= 0 else "var(--neg)"
+            rows.append(
+                '<tr><td>' + name + ' <span class="muted" style="font-size:10px">' + rng + '</span></td>'
+                + '<td>' + str(s["n"]) + '</td>'
+                + '<td style="color:' + color + '">' + f'{s["mean"]:+.4f}' + '</td>'
+                + '<td>' + f'{s["win"]:.0f}%' + '</td></tr>')
+
+    if k["t"] is not None:
+        t_line = ('高分组 - 低分组 Welch t = ' + f'{k["t"]:+.2f}'
+                  + '　（|t|<1.5 视为无差别；每组需 >=20 笔）')
+    else:
+        t_line = "每组需 >=20 笔才有统计意义；当前样本不足，不下结论。"
+
+    orphan = ('<div class="foot">' + str(k["orphan"])
+              + ' 笔平仓发生在 Kronos 接入之前，无系数可配对</div>') if k["orphan"] else ""
+
+    return (
+        '<div class="sub" style="margin-bottom:8px">已配对 <b>' + str(k["pairs"])
+        + '</b> 笔 · 待平仓 <b>' + str(max(0, k["with_factor"] - k["pairs"])) + '</b> 笔'
+        + '　<span style="color:' + verdict[1] + ';font-weight:600">● ' + verdict[0] + '</span></div>'
+        + '<table><thead><tr><th>分组</th><th>笔数</th><th>平均盈亏</th><th>胜率</th></tr></thead>'
+        + '<tbody>' + "".join(rows) + '</tbody></table>'
+        + '<div class="foot" style="margin-top:8px">' + t_line + '</div>'
+        + orphan
+    )
+
+
 def build() -> str:
     snaps = [r for r in _read_jsonl(RUNS / "pnl_report.jsonl") if "equity_usdt" in r]
     ledger = _read_jsonl(RUNS / "ledger.jsonl")
@@ -94,6 +191,7 @@ def build() -> str:
     for r in ledger:
         counts[r["kind"]] = counts.get(r["kind"], 0) + 1
 
+    kronos = kronos_stats(ledger)
     positions = state.get("positions", {})
     dust = state.get("dust", {})
 
@@ -204,6 +302,11 @@ def build() -> str:
     <table><thead><tr><th>标的</th><th>数量</th><th>成本</th><th>止损</th><th>止盈</th></tr></thead>
     <tbody>{pos_rows}</tbody></table>
     {f'<div class="foot">灰尘：{" · ".join(f"{k} {v["qty"]}（{v["value_usdt"]}）" for k,v in dust.items())}</div>' if dust else ''}
+  </div>
+
+  <div class="panel">
+    <h2>Kronos 仓位系数成绩单</h2>
+    {_kronos_html(kronos)}
   </div>
 
   <div class="panel">
