@@ -380,10 +380,33 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
     pos = _position_from(symbol, res, str(qty), snap.price)
     st["positions"][symbol] = pos.as_dict()
     st["closed_ts"].pop(symbol, None)
+    st.get("untracked", {}).pop(symbol, None)
     save_state(st)
     log("bought", symbol=symbol, qty=pos.qty, entry=pos.entry_price,
         stop=round(pos.stop_price, 6), tp=round(pos.tp_price, 6))
     return free_usdt - notional
+
+
+def dust_sell_qty(free_base: Decimal, recorded_qty: str | None,
+                  step: Decimal) -> Decimal:
+    """灰尘回收的卖出量。
+
+    2026-11-04 实盘事故：BNB 有 0.007 灰尘 + 0.009 持仓，
+    灰尘回收按**全部余额**卖出，把持仓一起卖掉：
+        dust_recovered qty=0.009（灰尘只有 0.007）
+        -> 12 分钟后 reconcile 报"账户已空"，那笔仓位的盈亏永久丢失。
+
+    所以回收量必须同时满足：不超过账户余额、不超过记录的灰尘数量。
+    """
+    qty = quantize_down(free_base, step)
+    if recorded_qty:
+        try:
+            cap = quantize_down(Decimal(str(recorded_qty)), step)
+            if cap > 0 and qty > cap:
+                qty = cap
+        except Exception:                                    # noqa: BLE001
+            pass
+    return qty
 
 
 def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
@@ -397,7 +420,12 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
     except Exception as exc:                                   # noqa: BLE001
         log("exit_balance_error", symbol=sym, error=str(exc)[:200])
         return
-    qty = quantize_down(free_base, snap.filters.step_size)
+    if pos is None:
+        # 灰尘回收：卖出量封顶在记录的灰尘数量，绝不碰持仓
+        rec = (st.get("dust", {}) or {}).get(sym) or {}
+        qty = dust_sell_qty(free_base, rec.get("qty"), snap.filters.step_size)
+    else:
+        qty = quantize_down(free_base, snap.filters.step_size)
     if qty <= 0:
         st["positions"].pop(sym, None)
         st["closed_ts"][sym] = int(time.time())
@@ -453,6 +481,7 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
     if pos is None:
         # 灰尘回收：没有可靠的建仓成本，不编 pnl
         st.get("dust", {}).pop(sym, None)
+        st.get("untracked", {}).pop(sym, None)   # 回收完就没有未跟踪余额了
         save_state(st)
         log("dust_recovered", symbol=sym, qty=str(qty), exit=float(snap.price),
             proceeds_usdt=str((qty * snap.price).quantize(Decimal("0.0001"))))
@@ -508,6 +537,12 @@ def _tick_locked() -> int:
 
     # 1.5) 灰尘回收：残量涨回 minNotional 以上就卖掉，别白扔
     for sym in list(st.get("dust", {})):
+        # 有持仓时绝不能做灰尘回收：do_exit 按全部余额下单，会把仓位一起卖掉。
+        # 等仓位平掉之后再回收，灰尘不会消失。
+        if sym in st.get("positions", {}):
+            log("dust_skip_position", symbol=sym,
+                note="该标的有持仓，跳过灰尘回收以免误卖仓位")
+            continue
         try:
             snap = bp.snapshot(sym)
             price = Decimal(str(snap.price))
