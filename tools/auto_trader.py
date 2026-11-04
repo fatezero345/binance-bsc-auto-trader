@@ -230,11 +230,16 @@ def _live(policy: Policy) -> tuple[Policy, object]:
 
 
 def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
-           free_usdt: Decimal, st: dict) -> Decimal:
+           free_usdt: Decimal, st: dict, budget_usdt: Decimal | None = None) -> Decimal:
     """尝试开一仓。返回剩余可用 USDT。"""
     try:
         kl = bp._request("/api/v3/klines", {"symbol": symbol, "interval": "15m", "limit": 96})
-        v = entry_gate(closes_from_klines(kl))
+        st_cfg = policy.strategy
+        v = entry_gate(
+            closes_from_klines(kl),
+            dev_sigmas=float(st_cfg.get("entry_dev_sigmas", 1.0)),
+            momentum_sigmas=float(st_cfg.get("entry_momentum_sigmas", 2.0)),
+        )
     except Exception as exc:                                   # noqa: BLE001
         log("gate_error", symbol=symbol, error=str(exc)[:160])
         return free_usdt
@@ -248,7 +253,8 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
     except Exception as exc:                                   # noqa: BLE001
         log("market_error", symbol=symbol, error=str(exc)[:160])
         return free_usdt
-    qty, err = plan_buy_quantity(snap.price, policy.notional_ceiling,
+    budget = budget_usdt if budget_usdt is not None else policy.notional_ceiling
+    qty, err = plan_buy_quantity(snap.price, budget,
                                  snap.filters.min_notional, snap.filters.step_size,
                                  snap.filters.min_qty)
     if qty is None:
@@ -438,12 +444,13 @@ def _tick_locked() -> int:
         except Exception as exc:                               # noqa: BLE001
             log("dust_error", symbol=sym, error=str(exc)[:160])
 
-    # 2) 入场
+    # 2) 入场：按「剩余现金 / 剩余仓位」动态分配，避免前两仓吃满、第三仓买不起
     for sym in symbols:
+        slots = policy.max_open_positions - len(st["positions"])
+        if slots <= 0:
+            break
         if sym in st["positions"]:
             continue
-        if len(st["positions"]) >= policy.max_open_positions:
-            break
         closed = st["closed_ts"].get(sym, 0)
         if closed and (now - closed) < COOLDOWN_S:
             log("cooldown", symbol=sym, remaining_s=int(COOLDOWN_S - (now - closed)))
@@ -452,11 +459,14 @@ def _tick_locked() -> int:
         if fail_until > now:
             log("fail_backoff", symbol=sym, remaining_s=int(fail_until - now))
             continue
-        if free_usdt < policy.notional_ceiling:
-            log("no_cash", symbol=sym, free=str(free_usdt),
-                need=str(policy.notional_ceiling))
+        budget = min(policy.notional_ceiling, (free_usdt / slots).quantize(Decimal("0.0001")))
+        if budget < policy.min_notional:
+            log("no_cash", symbol=sym, free=str(free_usdt), slots=slots, budget=str(budget))
             break
-        free_usdt = do_buy(sym, policy, key, secret, live, free_usdt, st)
+        before_n = len(st["positions"])
+        free_usdt = do_buy(sym, policy, key, secret, live, free_usdt, st, budget_usdt=budget)
+        if len(st["positions"]) > before_n:
+            continue
 
     return 0
 

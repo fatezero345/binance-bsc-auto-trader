@@ -110,6 +110,10 @@ class Policy:
         return self._get("venue", "binance")
 
     @property
+    def strategy(self) -> dict:
+        return self.raw.get("strategy", {}) or {}
+
+    @property
     def accepted_risk_flags(self) -> dict:
         """所有者已署名接受的风险位（flag -> 理由）。放行但记账。"""
         return self.binance_perms.get("accepted_risk_flags", {}) or {}

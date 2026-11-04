@@ -125,3 +125,11 @@ dry_run = true                    # true -> POST /api/v3/order/test（校验签�
 # 真实下单的最后一道：不设这个环境变量，submit_order() 仍然拒绝。
 require_env_unlock = "TRADER_LIVE_ORDERS"
 allow_mainnet = true
+
+[strategy]
+# 2026-11-04 所有者选 A：放宽入场闸，让它更常开仓。
+# entry_dev_sigmas = 0 表示**关闭**「偏离 MA20 多少个 sigma 就不买」这一条，
+# 只保留「1 小时内急跌超过 N 个 sigma 不接刀」。
+# 代价必须写清楚：慢跌行情下会照买，期望仍然为负，只是参与度变高。
+entry_dev_sigmas = 0
+entry_momentum_sigmas = 2.0

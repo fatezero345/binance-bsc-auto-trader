@@ -31,7 +31,10 @@ from src.strategy.momentum_gate import closes_from_klines, entry_gate  # noqa: E
 def check(symbol: str, interval: str, limit: int, policy) -> dict:
     kl = bp._request("/api/v3/klines", {"symbol": symbol, "interval": interval, "limit": limit})
     closes = closes_from_klines(kl)
-    v = entry_gate(closes)
+    cfg = policy.strategy
+    v = entry_gate(closes,
+                   dev_sigmas=float(cfg.get("entry_dev_sigmas", 1.0)),
+                   momentum_sigmas=float(cfg.get("entry_momentum_sigmas", 2.0)))
     f = bp.symbol_filters([symbol])[symbol]
     price = Decimal(str(v.price))
 

@@ -12,9 +12,13 @@
 
 from __future__ import annotations
 
+import math
 import statistics
 from dataclasses import dataclass
 from decimal import Decimal
+
+
+MOMENTUM_BARS = 4          # chg_1h 跨 4 根 15m K 线
 
 
 @dataclass(frozen=True)
@@ -48,6 +52,7 @@ def entry_gate(
 
     拒绝条件（任一成立即 SKIP）：
       1. 偏离 MA 的幅度超过 ``dev_sigmas`` 个 σ（跌得太狠，不接刀）；
+         ``dev_sigmas <= 0`` 表示**关闭**这一条（只留急跌保护）；
       2. 近 5 根的总变化跌幅超过 ``momentum_sigmas`` 个 σ（正在快速下坠）。
 
     参数默认值写死在这里，不随某次决策调整 —— 要改必须改代码并说明理由。
@@ -64,13 +69,23 @@ def entry_gate(
 
     if sigma == 0:
         return GateVerdict(False, "zero volatility: no basis to judge", sigma, ma, price, dev, chg_1h, 0.0)
-    if dev <= -dev_sigmas * sigma:
+    sigma_mom = sigma * math.sqrt(MOMENTUM_BARS)
+    # dev_sigmas <= 0 -> 关闭「均线偏离」这一条件，只保留「急跌不接刀」
+    # 2026-11-04 所有者决定放宽：慢跌行情下 1σ 会让系统连续 2.5 小时一单不下。
+    if dev_sigmas > 0 and dev <= -dev_sigmas * sigma:
         reason = f"deviation {dev*100:.3f}% below -{dev_sigmas}sigma"
-        return GateVerdict(False, reason, sigma, ma, price, dev, chg_1h, dev_sigmas * sigma)
-    if chg_1h <= -momentum_sigmas * sigma:
-        reason = f"1h drop {chg_1h*100:.3f}% beyond -{momentum_sigmas}sigma"
-        return GateVerdict(False, reason, sigma, ma, price, dev, chg_1h, dev_sigmas * sigma)
-    return GateVerdict(True, "within tolerance", sigma, ma, price, dev, chg_1h, dev_sigmas * sigma)
+        return GateVerdict(False, reason, sigma, ma, price, dev, chg_1h, momentum_sigmas * sigma_mom)
+    # ★ 尺度修正（2026-11-04）：sigma 是**单根**K线收益的标准差，
+    #   而 chg_1h 跨了 4 根，其标准差约为 sigma*sqrt(4)。
+    #   拿 1 小时的变动直接比单根 sigma 会系统性地过度拦截：
+    #   实测 BNB 的 1h 跌幅 -0.395%，被当成 "超过 2sigma(0.382%)" 拒掉，
+    #   实际 1h 的 2sigma 应为 0.764%。这不是调参，是量纲错误。
+    if chg_1h <= -momentum_sigmas * sigma_mom:
+        reason = (f"1h drop {chg_1h*100:.3f}% beyond "
+                  f"-{momentum_sigmas}sigma_1h({momentum_sigmas*sigma_mom*100:.3f}%)")
+        return GateVerdict(False, reason, sigma, ma, price, dev, chg_1h, momentum_sigmas * sigma_mom)
+    return GateVerdict(True, "within tolerance", sigma, ma, price, dev, chg_1h,
+                       dev_sigmas * sigma if dev_sigmas > 0 else momentum_sigmas * sigma_mom)
 
 
 def closes_from_klines(klines: list[list]) -> list[float]:
