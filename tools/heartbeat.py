@@ -51,6 +51,15 @@ LEDGER = ROOT / "runs" / "ledger.jsonl"
 RUN_DAEMON = ROOT / "tools" / "run_daemon.vbs"
 
 STALE_SECONDS = 900          # 15 分钟没有新事件就算停摆
+CREATE_NEW = 0x00000010
+
+# 汇报类任务的自检清单：名字 -> 容忍的静默秒数（约 2 个周期）
+# 2026-11-04 踩过两次：418 封禁、bsc-pnl-report 被禁用 7 小时无人发现。
+# 心跳原来只盯交易器，这两类"静默死亡"都漏掉了。
+WATCHED_TASKS = {
+    "bsc-pnl-report": 900,          # 周期 5 分钟，容忍 15 分钟
+    "bsc-kronos-scorecard": 3900,   # 周期 30 分钟，容忍 65 分钟
+}
 CREATE_NO_WINDOW = 0x08000000
 
 
@@ -107,6 +116,68 @@ def daemon_pids() -> list[int]:
         return []
 
 
+def task_health() -> list[dict]:
+    """读取被监控任务的状态与上次运行时间。"""
+    names = ",".join("'" + n + "'" for n in WATCHED_TASKS)
+    ps = (
+        "Get-ScheduledTask -TaskName " + names + " -ErrorAction SilentlyContinue | "
+        "ForEach-Object { $i = Get-ScheduledTaskInfo -TaskName $_.TaskName -ErrorAction SilentlyContinue; "
+        "[pscustomobject]@{ name = $_.TaskName; state = [string]$_.State; "
+        "last = if ($i -and $i.LastRunTime) { $i.LastRunTime.ToString('o') } else { $null } } } | "
+        "ConvertTo-Json -Compress"
+    )
+    try:
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps],
+            capture_output=True, text=True, timeout=40, creationflags=CREATE_NO_WINDOW,
+        )
+        raw = (out.stdout or "").strip()
+        if not raw:
+            return []
+        data = json.loads(raw)
+        return data if isinstance(data, list) else [data]
+    except Exception:                                        # noqa: BLE001
+        return []
+
+
+def fix_tasks() -> list[dict]:
+    """禁用就启用；超过容忍时间没跑就立即启动一次。"""
+    actions = []
+    now = time.time()
+    for info in task_health():
+        name = info.get("name") or ""
+        tol = WATCHED_TASKS.get(name)
+        if tol is None:
+            continue
+        state = (info.get("state") or "").lower()
+        last = info.get("last")
+        age = None
+        if last:
+            try:
+                age = now - datetime.strptime(last[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+            except ValueError:
+                age = None
+
+        if state == "disabled":
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                            f"Enable-ScheduledTask -TaskName '{name}' | Out-Null"],
+                           capture_output=True, timeout=30, creationflags=CREATE_NO_WINDOW)
+            log("task_disabled", task=name, note="任务被禁用，已重新启用")
+            actions.append({"task": name, "action": "enabled"})
+            continue
+
+        if age is None or age > tol:
+            subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                            f"Start-ScheduledTask -TaskName '{name}'"],
+                           capture_output=True, timeout=30, creationflags=CREATE_NO_WINDOW)
+            log("task_stale", task=name,
+                idle_s=None if age is None else int(age), tolerance_s=tol,
+                note="超过容忍时间没有运行，已强制启动一次")
+            actions.append({"task": name, "action": "started",
+                            "idle_s": None if age is None else int(age)})
+    return actions
+
+
 def start_daemon() -> bool:
     try:
         subprocess.Popen(
@@ -137,6 +208,7 @@ def main(argv: list[str]) -> int:
 
     stale = last_event_seconds()
     pids = daemon_pids()
+    task_actions = [] if args.check_only else fix_tasks()
 
     if stale is None:
         state = "no_ledger"
@@ -149,6 +221,7 @@ def main(argv: list[str]) -> int:
         "state": state,
         "idle_s": None if stale is None else int(stale),
         "pids": pids,
+        "tasks": task_actions,
     }
 
     if args.check_only:
