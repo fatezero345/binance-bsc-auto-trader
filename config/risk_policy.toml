@@ -133,3 +133,16 @@ allow_mainnet = true
 # 代价必须写清楚：慢跌行情下会照买，期望仍然为负，只是参与度变高。
 entry_dev_sigmas = 0
 entry_momentum_sigmas = 2.0
+
+[kronos]
+# 2026-11-04 所有者要求"强行使用 Kronos"。
+# 它作用于**每一笔买单**：仓位系数 = 模型给出的上涨概率，夹在 [min_factor, 1.0]。
+# 只能缩小仓位、不能放大，所以永远不会突破 notional_ceiling 与风险预算。
+# 服务不可用时退化为 1.0（中性）并记 kronos_error，不会阻断交易。
+enabled = true
+url = "http://127.0.0.1:8710"
+lookback = 200
+pred_len = 6
+samples = 32          # 32 条采样让 prob_up 的分辨率到 1/32，仓位系数不至于全是 0.5
+timeout_s = 30
+min_factor = 0.25

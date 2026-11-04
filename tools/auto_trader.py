@@ -59,6 +59,7 @@ from src.risk import (  # noqa: E402
 )
 from src.strategy.exit_rules import Position, exit_decision  # noqa: E402
 from src.strategy.momentum_gate import closes_from_klines, entry_gate  # noqa: E402
+from src.strategy.kronos_client import KronosClient  # noqa: E402
 from src.wallet import binance_account as wa  # noqa: E402
 
 HOME = Path(os.environ.get("USERPROFILE", os.path.expanduser("~")))
@@ -73,6 +74,25 @@ TP_BPS = 600                 # +6%
 MAX_HOLD_S = 4 * 3600
 COOLDOWN_S = 900
 FAIL_BACKOFF_S = 1800
+_KRONOS: "KronosClient | None" = None
+
+
+def kronos() -> "KronosClient | None":
+    """按 policy 的 [kronos] 段懒构造。enabled=false 时返回 None。"""
+    global _KRONOS
+    cfg = load_policy().raw.get("kronos", {}) or {}
+    if not cfg.get("enabled", False):
+        return None
+    if _KRONOS is None:
+        _KRONOS = KronosClient(
+            url=cfg.get("url", "http://127.0.0.1:8710"),
+            timeout=float(cfg.get("timeout_s", 30)),
+            lookback=int(cfg.get("lookback", 200)),
+            pred_len=int(cfg.get("pred_len", 6)),
+            samples=int(cfg.get("samples", 16)),
+            min_factor=float(cfg.get("min_factor", 0.25)),
+        )
+    return _KRONOS
 RATE_LIMIT_SLEEP_S = 1800    # 撞到 429/418 就停半小时，绝不继续请求        # 下单失败后，该标的 30 分钟内不再重试
                              # 2026-11-04 实测：BNBUSDT 连续 -1013 失败 82 次，
                              # 每 5 分钟一次，纯粹在烧请求权重。
@@ -229,6 +249,20 @@ def _live(policy: Policy) -> tuple[Policy, object]:
     return lp, execution_gate(lp, environ={"TRADER_LIVE_ORDERS": "1"})
 
 
+def klines_to_bars(kl: list) -> list:
+    """币安 klines 数组 -> Kronos 需要的 bar 字典。"""
+    from datetime import datetime, timezone
+
+    out = []
+    for k in kl:
+        out.append({
+            "timestamp": datetime.fromtimestamp(k[0] / 1000, tz=timezone.utc)
+                                   .strftime("%Y-%m-%dT%H:%M:%S"),
+            "open": k[1], "high": k[2], "low": k[3], "close": k[4], "volume": k[5],
+        })
+    return out
+
+
 def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
            free_usdt: Decimal, st: dict, budget_usdt: Decimal | None = None) -> Decimal:
     """尝试开一仓。返回剩余可用 USDT。"""
@@ -254,6 +288,28 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
         log("market_error", symbol=symbol, error=str(exc)[:160])
         return free_usdt
     budget = budget_usdt if budget_usdt is not None else policy.notional_ceiling
+
+    # ── Kronos 加权：强制作用于每一笔买单 ──────────────────────────────
+    # 系数 = prob_up，夹在 [min_factor, 1.0]。只能缩小仓位、不能放大，
+    # 因此永远不会突破 notional_ceiling 与风险预算。
+    kc = kronos()
+    if kc is not None:
+        try:
+            _kcfg = policy.raw.get("kronos", {}) or {}
+            kl4 = bp._request("/api/v3/klines",
+                              {"symbol": symbol, "interval": "4h",
+                               "limit": int(_kcfg.get("lookback", 200)) + 5})
+            kd = kc.decision(symbol, "4h", klines_to_bars(kl4))
+            log("kronos", symbol=symbol, **kd.as_dict())
+            if kd.ok and kd.size_factor < 1.0:
+                before = budget
+                budget = (budget * Decimal(str(kd.size_factor))).quantize(Decimal("0.0001"))
+                log("kronos_sized", symbol=symbol, before=str(before), after=str(budget),
+                    factor=round(kd.size_factor, 4))
+        except Exception as exc:                                # noqa: BLE001
+            log("kronos_error", symbol=symbol,
+                error=f"{type(exc).__name__}: {str(exc)[:140]}")
+
     qty, err = plan_buy_quantity(snap.price, budget,
                                  snap.filters.min_notional, snap.filters.step_size,
                                  snap.filters.min_qty)
