@@ -141,6 +141,8 @@ def build() -> str:
     return f"""<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="refresh" content="60">
+<!-- 每 60 秒自刷新一次：数据由 bsc-pnl-report 每 5 分钟重建 -->
 <title>自动交易 · 盈亏看板</title>
 <style>
   :root {{
