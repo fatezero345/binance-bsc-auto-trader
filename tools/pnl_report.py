@@ -164,6 +164,15 @@ def main() -> int:
             rows.append(d)
 
     MD.write_text(render(rows), encoding="utf-8")
+
+    # 顺带刷新可视化看板（自包含 HTML，侧边栏直接开）
+    try:
+        sys.path.insert(0, str(ROOT / "tools"))
+        import dashboard  # noqa: PLC0415
+
+        dashboard.main([])
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"dashboard failed: {exc}")
     print(f"{rec['ts']}  equity={rec['equity_usdt']}  pnl={rec['pnl_usdt']} ({rec['pnl_pct']}%)")
     return 0
 
