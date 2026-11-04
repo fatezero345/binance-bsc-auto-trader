@@ -53,7 +53,7 @@ def _request(
             body = exc.read().decode("utf-8", "replace")[:300]
             last = MarketError(f"{path} -> HTTP {exc.code}: {body}")
             # 4xx 是确定性错误，重试无意义；5xx / 429 才重试
-            if exc.code < 500 and exc.code != 429:
+            if exc.code < 500:   # 429/418 绝不重试：重试会把限流放大成 IP 封禁
                 raise last from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             last = MarketError(f"{path} -> unreachable: {exc}")

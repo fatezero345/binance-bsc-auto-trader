@@ -72,6 +72,10 @@ STOP_BPS = 500               # -5%
 TP_BPS = 600                 # +6%
 MAX_HOLD_S = 4 * 3600
 COOLDOWN_S = 900
+FAIL_BACKOFF_S = 1800
+RATE_LIMIT_SLEEP_S = 1800    # 撞到 429/418 就停半小时，绝不继续请求        # 下单失败后，该标的 30 分钟内不再重试
+                             # 2026-11-04 实测：BNBUSDT 连续 -1013 失败 82 次，
+                             # 每 5 分钟一次，纯粹在烧请求权重。
 
 
 # ------------------------------------------------------------------ 基础
@@ -282,7 +286,11 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
         if not res:
             return free_usdt
     except ExecutionRefused as exc:
-        log("order_failed", side="BUY", symbol=symbol, error=str(exc)[:300])
+        st.setdefault("fail_until", {})[symbol] = int(time.time()) + FAIL_BACKOFF_S
+        save_state(st)
+        log("order_failed", side="BUY", symbol=symbol, error=str(exc)[:300],
+            qty=str(qty), price=str(snap.price), notional=str(notional),
+            backoff_s=FAIL_BACKOFF_S)
         return free_usdt
 
     pos = _position_from(symbol, res, str(qty), snap.price)
@@ -343,7 +351,7 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
         log("order_failed", side="SELL", symbol=sym, error=str(exc)[:300], qty=str(qty))
         return
 
-    pnl = (snap.price - pos.entry_price) * float(qty)
+    pnl = (float(snap.price) - pos.entry_price) * float(qty)
     st["positions"].pop(sym, None)
     st["closed_ts"][sym] = int(time.time())
     save_state(st)
@@ -402,6 +410,10 @@ def _tick_locked() -> int:
         if closed and (now - closed) < COOLDOWN_S:
             log("cooldown", symbol=sym, remaining_s=int(COOLDOWN_S - (now - closed)))
             continue
+        fail_until = st.get("fail_until", {}).get(sym, 0)
+        if fail_until > now:
+            log("fail_backoff", symbol=sym, remaining_s=int(fail_until - now))
+            continue
         if free_usdt < policy.notional_ceiling:
             log("no_cash", symbol=sym, free=str(free_usdt),
                 need=str(policy.notional_ceiling))
@@ -452,11 +464,19 @@ def main(argv: list[str]) -> int:
     if args.loop:
         log("daemon_start", interval=args.interval, pid=os.getpid())
         while True:
+            sleep_s = max(30, args.interval)
             try:
                 tick()
             except Exception as exc:                           # noqa: BLE001
-                log("tick_error", error=f"{type(exc).__name__}: {str(exc)[:300]}")
-            time.sleep(max(30, args.interval))
+                msg = f"{type(exc).__name__}: {exc}"
+                log("tick_error", error=msg[:300])
+                # 2026-11-04：82 次连续失败把 IP 打进了 418 封禁。
+                # 限流/封禁时必须**停下来**，而不是按原节奏继续请求。
+                if "418" in msg or "429" in msg or "-1003" in msg:
+                    sleep_s = RATE_LIMIT_SLEEP_S
+                    log("rate_limited", sleep_s=sleep_s,
+                        note="backing off instead of hammering the API")
+            time.sleep(sleep_s)
     if args.status:
         return status()
     if args.flatten:
