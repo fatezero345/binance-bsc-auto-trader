@@ -86,6 +86,51 @@ def ledger_age() -> float | None:
         return None
 
 
+KRONOS_URL = "http://127.0.0.1:8710/health"
+KRONOS_DIR = "/root/kronos-service"
+
+
+def kronos_alive(timeout: float = 5.0) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(KRONOS_URL, timeout=timeout) as r:
+            return r.status == 200
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def start_kronos() -> bool:
+    """用 setsid 完全脱离当前会话启动，否则进程会随启动它的会话一起死。
+    2026-11-05 实际踩过：用会话级后台任务启动，会话结束后服务直接消失，
+    交易器连续拿不到系数（退回满额下单）。"""
+    try:
+        # 不能用 capture_output：后台子进程会攥着管道不放，
+        # run() 会一直等到超时才返回（实测踩过，日志里 started=False 但服务其实起来了）。
+        subprocess.Popen(
+            ["bash", "-c",
+             f"cd {KRONOS_DIR} && setsid nohup ./run.sh > service.log 2>&1 < /dev/null &"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return True
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+def check_kronos(check_only: bool) -> dict:
+    if kronos_alive():
+        return {"alive": True}
+    if check_only:
+        log("ALERT Kronos 服务不可达（只检查模式，未处理）")
+        return {"alive": False, "action": "would-start"}
+    ok = start_kronos()
+    log(f"ALERT Kronos 服务不可达，已尝试重启 started={ok}")
+    time.sleep(6)
+    alive = kronos_alive()
+    log(f"RESULT Kronos 重启后 alive={alive}")
+    return {"alive": alive, "action": "started", "started_ok": ok}
+
+
 def schtasks(*args: str, timeout: int = 30) -> tuple[int, str]:
     """调用 Windows 的 schtasks。输出是 GBK，按替换解码。"""
     try:
@@ -131,6 +176,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--threshold", type=int, default=DEFAULT_THRESHOLD)
     ap.add_argument("--check-only", action="store_true")
     args = ap.parse_args(argv)
+
+    kronos = check_kronos(args.check_only)
+    if kronos.get("alive") is False:
+        print(f"kronos down -> {kronos}")
 
     age = ledger_age()
     if age is None:

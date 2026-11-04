@@ -62,7 +62,8 @@ def kronos_stats(ledger: list[dict]) -> dict:
                 with_factor += 1
         elif k == "sold" and isinstance(r.get("pnl_usdt"), (int, float)):
             bucket = q.get(sym) or []
-            e = bucket.pop(0) if bucket else None
+            # LIFO：同标的只持一仓，平仓关的是最近那笔买入（理由见 kronos_scorecard.py）
+            e = bucket.pop() if bucket else None
             if not e or e["factor"] is None:
                 orphan += 1
                 continue

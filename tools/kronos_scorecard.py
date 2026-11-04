@@ -93,7 +93,9 @@ def pair(rows: list[dict]) -> tuple[list[dict], int]:
             })
         elif kind == "sold":
             q = queues.get(sym) or []
-            entry = q.pop(0) if q else None
+            # LIFO：每个标的只持一仓，平仓关掉的是最近那笔买入。
+            # FIFO 会让被 reconcile 清掉、没有 sold 的旧买入堵在队首，配对失败。
+            entry = q.pop() if q else None
             pnl = r.get("pnl_usdt")
             if pnl is None:
                 continue
