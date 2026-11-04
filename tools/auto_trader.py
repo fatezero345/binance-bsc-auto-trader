@@ -185,7 +185,7 @@ def reconcile(key: str, secret: str, st: dict, symbols: list[str]) -> dict:
             st["positions"].pop(sym, None)
             st["closed_ts"][sym] = int(time.time())
             changed = True
-        elif (not has) and free >= filters[sym].min_qty:
+        elif (not has) and free >= filters[sym].min_qty and sym not in st.get("dust", {}):
             log("reconcile", symbol=sym, note="untracked balance", free=str(free))
             st.setdefault("untracked", {})[sym] = str(free)
             changed = True
