@@ -130,6 +130,31 @@ def _sparkline(values: list[float], w: int = 900, h: int = 220, pad: int = 8) ->
 </svg>'''
 
 
+def _health_html(ledger: list[dict]) -> str:
+    """最近 1 小时的异常计数。异常不必翻日志才能看见。"""
+    from datetime import datetime as _dt, timedelta as _td
+    cutoff = _dt.now() - _td(hours=1)
+    BAD = {"tick_error", "order_failed", "order_state_unknown", "order_not_found",
+           "sell_blocked", "reconcile_error", "exit_balance_error", "kronos_error",
+           "daily_loss_halt", "heartbeat_stale", "tick_retry"}
+    bad = []
+    for r in ledger:
+        if r.get("kind") in BAD:
+            try:
+                if _dt.strptime(str(r.get("ts"))[:19], "%Y-%m-%dT%H:%M:%S") >= cutoff:
+                    bad.append(r)
+            except Exception:
+                pass
+    if not bad:
+        return ('<div style="color:var(--muted);font-size:12px;margin-bottom:12px">'
+                '✓ 最近 1 小时无异常</div>')
+    last = bad[-1]
+    return ('<div style="background:rgba(232,180,74,.10);border:1px solid #e8b44a;'
+            'color:#e8b44a;border-radius:8px;padding:7px 12px;font-size:12px;margin-bottom:12px">'
+            f'⚠ 最近 1 小时 {len(bad)} 个异常 · 最近 {last.get("kind")} '
+            f'{str(last.get("ts",""))[11:19]}</div>')
+
+
 def _stale_banner(ts) -> str:
     """快照超过 15 分钟就挂警告。2026-11-04 实际踩过：快照任务被禁用 7 小时，
     面板一直显示 7 小时前的权益，差点当成当前收益。"""
@@ -299,6 +324,7 @@ def build() -> str:
   <h1>自动交易 · 盈亏看板</h1>
   <div class="sub">最后更新 {html.escape(str(last.get('ts','-')))} · 数据来自本地文件，不联网</div>
   {_stale_banner(last.get('ts'))}
+  {_health_html(ledger)}
 
   <div class="cards">
     <div class="card"><div class="k">总权益</div>

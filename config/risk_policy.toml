@@ -93,6 +93,10 @@ max_position_notional_usdt = 8.05  # = 硬上限，与 order_limits 保持一致
 
 [circuit_breaker]
 max_cumulative_realized_loss_usdt = 1.50
+# 日内已实现亏损上限：当天亏到 0.80 就停止开新仓（平仓不受影响）。
+# 2026-11-05 新增 —— 之前只有累计熔断，且因为 realized_loss_usdt 被硬编码成 0,
+#   实际上从未生效。现在两个都接真实账本。
+max_daily_realized_loss_usdt = 0.80
 mode = "fail_closed"              # 触发后拒绝一切新订单，直到人工重置
 
 [forbidden]

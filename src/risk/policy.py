@@ -84,6 +84,18 @@ class Policy:
         return int(self._get("portfolio", "max_open_positions"))
 
     @property
+    def max_daily_loss(self) -> Decimal:
+        """当日已实现亏损上限。0 或缺失表示不启用。
+
+        与 max_cumulative_loss 的区别：累计熔断管的是"总账"，反应慢；
+        日内上限管的是"今天手气不对就收手"，能在坏日子及时止损。
+        """
+        try:
+            return Decimal(str(self._get("circuit_breaker", "max_daily_realized_loss_usdt")))
+        except Exception:                                    # noqa: BLE001
+            return Decimal("0")
+
+    @property
     def max_cumulative_loss(self) -> Decimal:
         return Decimal(str(self._get("circuit_breaker", "max_cumulative_realized_loss_usdt")))
 

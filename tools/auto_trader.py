@@ -26,7 +26,7 @@ import json
 import os
 import sys
 import time
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +45,7 @@ from src.execution.binance_spot import (  # noqa: E402
 )
 from src.market import binance_public as bp  # noqa: E402
 from src.risk import (  # noqa: E402
+    quantize_up,  # noqa: E402
     Instrument,
     OrderIntent,
     Policy,
@@ -100,6 +101,73 @@ RATE_LIMIT_SLEEP_S = 1800    # 撞到 429/418 就停半小时，绝不继续请�
 
 
 # ------------------------------------------------------------------ 基础
+_PNL_CACHE: dict = {"key": None, "total": Decimal("0"), "today": Decimal("0"), "day": ""}
+
+
+def realized_pnl() -> tuple[Decimal, Decimal]:
+    """从账本算出 (累计已实现盈亏, 当日已实现盈亏)。
+
+    2026-11-05 发现：PortfolioState 的 realized_loss_usdt 在两处调用点
+    都被硬编码成 Decimal("0")，所以 policy 里的熔断判断
+        realized_loss_usdt >= max_cumulative_realized_loss_usdt
+    **永远不会成立**，配置的 1.50 USDT 上限是一纸空文。
+
+    以账本为唯一真源（state.json 可能被重建，账本不会丢）。
+    按 (大小, mtime) 缓存，避免每轮重复解析 1000+ 行。
+    """
+    global _PNL_CACHE
+    try:
+        stat = LEDGER.stat()
+        stamp = (stat.st_size, int(stat.st_mtime))
+    except OSError:
+        return Decimal("0"), Decimal("0")
+
+    today = time.strftime("%Y-%m-%d")
+    if _PNL_CACHE["key"] == stamp and _PNL_CACHE["day"] == today:
+        return _PNL_CACHE["total"], _PNL_CACHE["today"]
+
+    total = Decimal("0")
+    today_sum = Decimal("0")
+    try:
+        with LEDGER.open("r", encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or '"sold"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if rec.get("kind") != "sold":
+                    continue
+                v = rec.get("pnl_usdt")
+                if v is None:
+                    continue
+                try:
+                    d = Decimal(str(v))
+                except Exception:                            # noqa: BLE001
+                    continue
+                total += d
+                if str(rec.get("ts", ""))[:10] == today:
+                    today_sum += d
+    except OSError:
+        return Decimal("0"), Decimal("0")
+
+    _PNL_CACHE = {"key": stamp, "total": total, "today": today_sum, "day": today}
+    return total, today_sum
+
+
+def realized_loss() -> Decimal:
+    """累计已实现**亏损**（正数=亏了）。盈利会抵扣，反映净回撤。"""
+    total, _ = realized_pnl()
+    return max(Decimal("0"), -total)
+
+
+def daily_loss() -> Decimal:
+    _, today = realized_pnl()
+    return max(Decimal("0"), -today)
+
+
 def log(kind: str, **kw) -> None:
     LEDGER.parent.mkdir(parents=True, exist_ok=True)
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "kind": kind, **kw}
@@ -251,13 +319,41 @@ def _live(policy: Policy) -> tuple[Policy, object]:
 
 
 def min_executable_notional(price: Decimal, filters) -> Decimal:
-    """该标的最小可成交名义金额：满足 minNotional 且是 stepSize 的整数倍。"""
-    one_step = (filters.step_size * price).quantize(Decimal("0.0001"))
-    if one_step >= filters.min_notional:
-        return one_step
-    # 一步不够 minNotional，需要向上取整到足够的步数
-    steps = (filters.min_notional / one_step).to_integral_value(rounding="ROUND_CEILING")
-    return (steps * one_step).quantize(Decimal("0.0001"))
+    """该标的最小可成交名义金额。
+
+    必须与 plan_buy_quantity 的回退路径**用同一个式子**，否则两边会打架：
+        plan_buy_quantity 回退时取 quantize_up(min_notional / price, step)
+    2026-11-05 踩过两次：
+      1. 一开始自己按"步长×价"推，算出的预算比实际需要少 0.0001 -> 拒单
+      2. 改成向上取整后仍不一致，因为 floor 与 min_qty 的取整先后不同
+    最终直接复用同一个公式，保证"抬底之后一定能成交"。
+    """
+    qty = quantize_up(filters.min_notional / price, filters.step_size)
+    if qty < filters.min_qty:
+        qty = quantize_up(filters.min_qty, filters.step_size)
+    return (qty * price).quantize(Decimal("0.0001"), rounding=ROUND_CEILING)
+
+
+EXIT_RETRY_S = 1800           # 整笔低于下限时的重试间隔
+NETWORK_RETRY_MAX = 2          # 一次 tick 因网络失败，短退避重试的上限
+NETWORK_RETRY_DELAY_S = 60     # 比 300s 的正常周期短得多
+
+_TRANSIENT_MARKERS = (
+    "unreachable", "URLError", "SSL", "EOF", "Timeout", "timed out",
+    "Connection", "RemoteDisconnected", "ConnectionReset", "temporarily",
+)
+
+
+def is_transient_network_error(msg: str) -> bool:
+    """这条错误是不是"网络抖了一下"而非逻辑错误。
+
+    2026-11-05 实测：08:05/08:11/08:16/09:02 四次 SSL UNEXPECTED_EOF，
+    钱包层已经重试 3 次（1s/2s 退避）仍然全挂 —— 说明链路中断持续了数秒。
+    这时按 300s 的正常周期等待，等于白丢一个完整周期。
+    正确做法：短退避（60s）重试本轮，最多 2 次。
+    """
+    m = msg or ""
+    return any(k in m for k in _TRANSIENT_MARKERS)
 
 
 def klines_to_bars(kl: list) -> list:
@@ -345,7 +441,7 @@ def do_buy(symbol: str, policy: Policy, key: str, secret: str, live: bool,
                          base_qty=qty, reference_price=snap.price,
                          stop_distance_bps=STOP_BPS, slippage_bps=50, fee_bps=10,
                          filters=snap.filters)
-    state = PortfolioState(equity_usdt=free_usdt, realized_loss_usdt=Decimal("0"),
+    state = PortfolioState(equity_usdt=free_usdt, realized_loss_usdt=realized_loss(),
                            open_positions=len(st["positions"]), quote_free_usdt=free_usdt)
     perms = wa.full_permissions(key, secret)
     d = assess(intent, state, perms, policy)
@@ -439,8 +535,21 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
     # 正确做法：认赔这笔灰尘，记进账本并从持仓里移除，**不要每 5 分钟重试一次**。
     sellable = qty * snap.price
     if sellable < snap.filters.min_notional:
+        if pos is not None:
+            # 2026-11-05 实盘：一笔 2.48 CAKE 的持仓超时平仓时名义只有 4.94 < 5.00，
+            # 被当成"卖不掉的灰尘"写掉并移出持仓表 —— **一笔约 5 USDT 的真实仓位
+            # 就这样从账上消失了**。它其实还躺在账户里，下次建仓才被合并。
+            # 正确做法：保留仓位，等价格回升到够得着下单门槛再卖。
+            # 这里完全不提交订单，所以不会产生 -1013 拒单，也就没有 418 风险；
+            # 只加 30 分钟冷却，避免每轮都白读一次行情与余额。
+            st.setdefault("exit_cooldown", {})[sym] = int(time.time()) + EXIT_RETRY_S
+            save_state(st)
+            log("position_below_min_notional", symbol=sym, qty=str(qty),
+                value_usdt=str(sellable), min_notional=str(snap.filters.min_notional),
+                retry_in_s=EXIT_RETRY_S,
+                note="整笔低于交易所下限，保留仓位等价格回升，不写死成灰尘")
+            return
         st.setdefault("dust", {})[sym] = {"qty": str(qty), "value_usdt": str(sellable)}
-        st["positions"].pop(sym, None)
         st["closed_ts"][sym] = int(time.time())
         save_state(st)
         log("dust_unsellable", symbol=sym, qty=str(qty), value_usdt=str(sellable),
@@ -461,7 +570,7 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
     lp, gate = _live(policy)
     perms = wa.full_permissions(key, secret)
     free_usdt = Decimal(wa.balances(acct).get("USDT", "0"))
-    state = PortfolioState(equity_usdt=free_usdt, realized_loss_usdt=Decimal("0"),
+    state = PortfolioState(equity_usdt=free_usdt, realized_loss_usdt=realized_loss(),
                            open_positions=len(st["positions"]), quote_free_usdt=free_usdt)
     d = assess(intent, state, perms, lp)
     if not d.approved:
@@ -486,9 +595,22 @@ def do_exit(policy: Policy, key: str, secret: str, live: bool, sym: str,
         log("dust_recovered", symbol=sym, qty=str(qty), exit=float(snap.price),
             proceeds_usdt=str((qty * snap.price).quantize(Decimal("0.0001"))))
         return
-    pnl = (float(snap.price) - pos.entry_price) * float(qty)
+    # 盈亏只能按**持仓量**算。卖出量取的是真实余额，里面可能还混着
+    # 之前被打成灰尘的同币残量（2026-11-05：CAKE 持仓 2.49 + 灰尘 2.48，
+    # 若按 4.97 算盈亏，这一笔的收益会被虚增近一倍）。
+    pos_qty = Decimal(str(pos.qty))
+    pnl_qty = min(Decimal(str(qty)), pos_qty)
+    pnl = (float(snap.price) - pos.entry_price) * float(pnl_qty)
+    extra = Decimal(str(qty)) - pnl_qty
+    if extra > 0:
+        st.get("dust", {}).pop(sym, None)
+        st.get("untracked", {}).pop(sym, None)
+        log("dust_cleared", symbol=sym, extra_qty=str(extra),
+            proceeds_usdt=str((extra * snap.price).quantize(Decimal("0.0001"))),
+            note="随持仓一起卖掉的同币残量，未计入本笔盈亏")
     st["positions"].pop(sym, None)
     st["closed_ts"][sym] = int(time.time())
+    st.pop("exit_cooldown", {}).pop(sym, None) if isinstance(st.get("exit_cooldown"), dict) else None
     save_state(st)
     log("sold", symbol=sym, qty=str(qty), exit=float(snap.price), why=why,
         pnl_usdt=round(pnl, 6))
@@ -523,6 +645,12 @@ def _tick_locked() -> int:
 
     # 1) 离场优先
     for sym in list(st["positions"]):
+        # 整笔低于交易所下限时会被放进冷却（见 do_exit），等价格回升再试
+        _cool = (st.get("exit_cooldown") or {}).get(sym, 0)
+        if _cool and now < _cool:
+            log("exit_cooldown", symbol=sym, remaining_s=_cool - now,
+                note="整笔低于交易所下限，等价格回升后再卖")
+            continue
         pos = Position.from_dict(st["positions"][sym])
         try:
             price = price_of(sym)
@@ -556,6 +684,15 @@ def _tick_locked() -> int:
                     need=str(snap.filters.min_notional))
         except Exception as exc:                               # noqa: BLE001
             log("dust_error", symbol=sym, error=str(exc)[:160])
+
+    # 1.8) 日内亏损上限：当天亏到阈值就停止开新仓（已有仓位照常平）
+    _daily_cap = policy.max_daily_loss
+    if _daily_cap > 0:
+        _dl = daily_loss()
+        if _dl >= _daily_cap:
+            log("daily_loss_halt", daily_loss=str(_dl), cap=str(_daily_cap),
+                note="当日已实现亏损达到上限，停止开新仓")
+            return
 
     # 2) 入场：按「剩余现金 / 剩余仓位」动态分配，避免前两仓吃满、第三仓买不起
     for sym in symbols:
@@ -624,10 +761,12 @@ def main(argv: list[str]) -> int:
 
     if args.loop:
         log("daemon_start", interval=args.interval, pid=os.getpid())
+        retries = 0
         while True:
             sleep_s = max(30, args.interval)
             try:
                 tick()
+                retries = 0
             except Exception as exc:                           # noqa: BLE001
                 msg = f"{type(exc).__name__}: {exc}"
                 log("tick_error", error=msg[:300])
@@ -635,8 +774,16 @@ def main(argv: list[str]) -> int:
                 # 限流/封禁时必须**停下来**，而不是按原节奏继续请求。
                 if "418" in msg or "429" in msg or "-1003" in msg:
                     sleep_s = RATE_LIMIT_SLEEP_S
+                    retries = 0
                     log("rate_limited", sleep_s=sleep_s,
                         note="backing off instead of hammering the API")
+                elif retries < NETWORK_RETRY_MAX and is_transient_network_error(msg):
+                    retries += 1
+                    sleep_s = NETWORK_RETRY_DELAY_S
+                    log("tick_retry", attempt=retries, delay_s=sleep_s,
+                        note="网络类错误，短退避后重试本轮而不是等满一个周期")
+                else:
+                    retries = 0
             time.sleep(sleep_s)
     if args.status:
         return status()
