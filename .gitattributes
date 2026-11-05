@@ -1,0 +1,9 @@
+# 统一行尾，避免"整文件改写"式的假 diff（本机 Windows，autocrlf 会把 LF 变 CRLF）
+* text=auto eol=lf
+
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.ps1 text eol=crlf
+*.png binary
+*.webp binary
+*.jpg binary

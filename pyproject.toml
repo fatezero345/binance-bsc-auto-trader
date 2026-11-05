@@ -1,0 +1,12 @@
+[project]
+name = "binance-bsc-auto-trader"
+version = "0.0.0"
+description = "P0: wallet audit and trading architecture for a BSC auto-trader (execution disabled)"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.setuptools]
+packages = [
+  "src", "src.market", "src.strategy", "src.risk", "src.wallet",
+  "src.execution", "src.backtest", "src.paper", "src.ledger", "src.reporting",
+]

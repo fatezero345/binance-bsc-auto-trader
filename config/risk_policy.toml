@@ -1,0 +1,153 @@
+# 硬风控策略 —— P0 任务书 §5「安全边界」的机器可读形态。
+#
+# v2（ADR-0002）：交易场所由 GMGN/BSC DEX 改为 **Binance 现货（CEX）**。
+#
+# 纪律（写进代码，不写进提示词）：
+#   1. 本文件每一项都必须由 src/risk/ 读取并拒绝违规意图；
+#      任何"我们会在提示词里提醒模型"的做法都视为未实现。
+#   2. fail_closed：读不到本文件、字段缺失、值非法，一律拒绝下单。
+#   3. 用 TOML 而非 YAML，是为了 stdlib tomllib（Python >=3.11）零依赖可读。
+
+[capital]
+initial_equity_usdt = 29.30
+base_currency = "USDT"
+
+[venue]
+# 唯一允许的交易场所。见 docs/adr/0002-binance-spot-as-venue.md
+primary = "binance_spot"
+base_url = "https://api.binance.com"
+# 演练优先用测试网；测试网账户与主网资产完全隔离
+testnet_base_url = "https://testnet.binance.vision"
+recv_window_ms = 60000     # 2026-11-03 实测 RTT 1-6.6s + 时钟偏差 -1.4~-2.7s，5s 不够
+# 本机时钟与服务器偏差上限。2026-11-03 实测 -163 ms，留 6 倍余量
+max_clock_skew_ms = 1000
+# 已归档的旧场所：代码保留，但不得被启用（CI 断言）
+archived = ["gmgn_bsc"]
+
+[venue.binance]
+# /api/v3/account 与 /sapi/v1/account/apiRestrictions 的权限断言
+require_can_trade = true
+# ★ 必须按 **Key 级** 权限位判定，不能用账户级 canWithdraw。
+#   2026-11-03 实测：账户 canWithdraw=True，而 Key 的 enableWithdrawals=False
+#   —— 读错字段会误报"提币权开着"。
+require_ip_restrict = false            # ADR-0003：实验账户接受无 IP 白名单
+
+# 允许的权限标记（正则）：SPOT，或 Binance 区域性实体使用的交易组标记 TRD_GRP_<digits>。
+# 2026-11-03 实测：本账户返回 ["TRD_GRP_236"]，说明"只认 SPOT 子集"是过严的错判 ——
+# 真实账户会被自己的策略误杀。改为「允许清单 + 禁止词」双段判定。
+allow_permission_patterns = ["^SPOT$", "^TRD_GRP_[0-9]+$"]
+# 出现任一标记即拒绝（这些才是真正越界的权限）
+forbidden_permission_markers = ["MARGIN", "LEVERAGED", "FUTURES", "OPTIONS", "CONVERT", "EARN"]
+require_ip_whitelist = true            # 由人工在交易所侧确认，脚本只做记录
+
+# 出现即**拒绝下单**的硬红线。只在"钱能被搬出平台"的方向上保留。
+forbidden_key_flags = [
+  "enable_withdrawals",          # 提币 —— 唯一保留的红线
+  "permits_universal_transfer",  # 万能划转（可跨账户搬钱）
+]
+
+# 明确禁止的交易模式（不是"没实现"，是"参数里没有这条路"）
+forbidden_modes = [
+  "margin",
+  "isolated_margin",
+  "futures",
+  "leverage_token",
+  "withdraw",
+  "transfer",
+  "universal_transfer",
+  "convert",
+  "earn",
+  "loan",
+]
+
+# 所有者已明确接受的风险位：记录，但不拒绝（见 docs/adr/0003-*.md）。
+# 规则：任何危险位必须落在 forbidden_key_flags 或本表之一 ——
+# 要么拒绝，要么有署名的接受记录；不允许"既不禁、也没人签"。
+[venue.binance.accepted_risk_flags]
+enable_futures           = "ADR-0003 / 2026-11-03 所有者明确接受；本仓库无任何合约代码路径"
+enable_internal_transfer = "ADR-0003 / 同上；只在自己的钱包间搬钱，搬不出平台"
+enable_margin            = "ADR-0003 / 同上；本仓库无任何杠杆代码路径"
+enable_vanilla_options   = "ADR-0003 / 同上；本仓库无任何期权代码路径"
+enable_portfolio_margin  = "ADR-0003 / 同上"
+
+[order_limits]
+# 单笔目标金额。2026-11-03 由所有者从 10.00 下调为 5.00。
+max_notional_per_order_usdt = 7.92      # 6.0 -> 7.92：ceiling 8.00，3 标的 x 8 = 24 USDT0
+# ★ 量化上浮容许度。步长是离散的，取整后的名义本金不可能恰好等于目标值：
+#   例 CAKEUSDT step=0.01、price=1.845 → 最小合法单 2.72 CAKE = 5.0184 USDT。
+#   因此 cap 的语义是「目标 5.00，硬上限 = 5.00 × (1 + 100bps) = 5.05」。
+#   超过硬上限一律拒绝，不做四舍五入、不自动缩量。
+max_quantization_overrun_bps = 100      # 1.00%
+max_risk_budget_per_order_usdt = 0.40   # 8.00 x 5% 止损 = 0.40；3 仓合计 1.20 < 1.50 熔断0
+max_slippage_bps = 300            # 3.00%
+# CEX 没有 gas，但有手续费。按 0.1% taker 计，5 USDT 单边 0.005 USDT
+max_fee_bps = 20                  # 0.20% 上限；实际费率以 /api/v3/account 为准
+# 交易所侧硬下限。P0 实测五个候选对均为 5.00 USDT（见 docs/04）
+min_notional_usdt = 5.00
+# 量化失败（步长把单子挤到 minNotional 之下或硬上限之上）的处理：拒绝，不四舍五入
+quantization_failure = "reject"
+
+[portfolio]
+max_open_positions = 3
+max_position_notional_usdt = 8.05  # = 硬上限，与 order_limits 保持一致
+
+[circuit_breaker]
+max_cumulative_realized_loss_usdt = 1.50
+# 日内已实现亏损上限：当天亏到 0.80 就停止开新仓（平仓不受影响）。
+# 2026-11-05 新增 —— 之前只有累计熔断，且因为 realized_loss_usdt 被硬编码成 0,
+#   实际上从未生效。现在两个都接真实账本。
+max_daily_realized_loss_usdt = 0.80
+mode = "fail_closed"              # 触发后拒绝一切新订单，直到人工重置
+
+[forbidden]
+leverage = false
+derivatives = false
+borrowing = false
+withdrawals = false
+transfers = false
+unlimited_approvals = false       # CEX 无 allowance，保留字段以保持策略形状一致
+
+[whitelist]
+# P0 审计过的现货交易对。新增交易对必须先在 docs/04 留下 filters 证据。
+symbols = [
+  "BTCUSDT",
+  "BNBUSDT",
+  "CAKEUSDT",
+]
+# 已拉取 filters 但未完成 P0 审计的对：出现在意图里按"未白名单"拒绝
+observer_symbols = [
+  "ETHUSDT",
+  "SOLUSDT",
+]
+quote_assets = ["USDT"]
+
+[execution]
+# ADR-0004：所有者 2026-11-03 授权「代码阻挡就改代码」。
+# 路径已打开；dry_run 保留，但含义变了 —— 现在真的会打交易所的 /order/test。
+enabled = true
+dry_run = true                    # true -> POST /api/v3/order/test（校验签名与过滤器，不撮合）
+# 真实下单的最后一道：不设这个环境变量，submit_order() 仍然拒绝。
+require_env_unlock = "TRADER_LIVE_ORDERS"
+allow_mainnet = true
+
+[strategy]
+# 2026-11-04 所有者选 A：放宽入场闸，让它更常开仓。
+# entry_dev_sigmas = 0 表示**关闭**「偏离 MA20 多少个 sigma 就不买」这一条，
+# 只保留「1 小时内急跌超过 N 个 sigma 不接刀」。
+# 代价必须写清楚：慢跌行情下会照买，期望仍然为负，只是参与度变高。
+entry_dev_sigmas = 0
+entry_momentum_sigmas = 2.0
+
+[kronos]
+# 2026-11-04 所有者要求"强行使用 Kronos"。
+# 它作用于**每一笔买单**：仓位系数 = 模型给出的上涨概率，夹在 [min_factor, 1.0]。
+# 只能缩小仓位、不能放大，所以永远不会突破 notional_ceiling 与风险预算。
+# 服务不可用时退化为 1.0（中性）并记 kronos_error，不会阻断交易。
+enabled = true
+url = "http://127.0.0.1:8710"
+lookback = 200
+pred_len = 6
+samples = 16          # 单次调用的采样数；随机性由 repeats 的中位数压下去
+repeats = 5           # 同一份数据连问 5 次取中位数：单次标准差约 0.10，取中位数后约 0.04
+timeout_s = 30
+min_factor = 0.25

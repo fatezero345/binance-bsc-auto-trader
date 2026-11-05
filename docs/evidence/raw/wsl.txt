@@ -1,0 +1,18 @@
+﻿# wsl @ 2026-11-03 11:26:19 +08:00
+  NAME            STATE           VERSION
+
+* Ubuntu-24.04    Running         2
+
+
+
+wsl : wsl: Failed to translate 'F:\UG 12 GREEN\YANXIU'
+所在位置 行:17 字符: 2
++ (wsl -e bash -lc "uname -srm; python3 --version; node -v" 2>&1 | Out- ...
++  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (wsl: Failed to ...2 GREEN\YANXIU':String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+Linux 6.18.54.1-microsoft-standard-WSL2 x86_64
+Python 3.12.3
+v24.21.0
+

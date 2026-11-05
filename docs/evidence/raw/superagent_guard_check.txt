@@ -1,0 +1,21 @@
+﻿# superagent guard Check @ 2026-11-03 11:26:19 +08:00
+
+[32;1mAt               : [0m2026-11-03T11:26:23.7589543+08:00
+[32;1mPort             : [0m64931
+[32;1mOrchestratorCode : [0m404
+[32;1mRuntimeState     : [0m
+[32;1mRuntimeDetail    : [0m
+[32;1mGithubState      : [0m
+[32;1mGithubDetail     : [0m
+[32;1mHealthy          : [0mFalse
+[32;1mLockExists       : [0mTrue
+[32;1mLockEntries      : [0m0
+[32;1mLockMtime        : [0m2026/11/3 11:04:20
+[32;1mLockRemovable    : [0mTrue
+[32;1mDshRunning       : [0mTrue
+[32;1mMainCount        : [0m1
+[32;1mMainPid          : [0m21728
+[32;1mServicePid       : [0m18420
+[32;1mOtherServers     : [0m{19504, 25040, 26492}
+
+

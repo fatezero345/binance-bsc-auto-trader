@@ -1,0 +1,1 @@
+"""Daily report and audit trail rendering. Read-only over the ledger."""
